@@ -14,6 +14,7 @@ aya-log = { workspace = true }
 env_logger = { workspace = true }
 libc = { workspace = true }
 log = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = [
     "macros",
     "rt",
@@ -40,5 +41,5 @@ cargo_metadata = { workspace = true }
 packet-watcher-rs-ebpf = { path = "../packet-watcher-rs-ebpf" }
 
 [[bin]]
-name = "packet-watcher-rs"
+name = "paccher-rs"
 path = "src/main.rs"

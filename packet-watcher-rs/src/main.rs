@@ -1,10 +1,19 @@
+use anyhow::Context;
 use aya::programs::KProbe;
-#[rustfmt::skip]
+use clap::Parser;
 use log::{debug, warn};
+use packet_watcher_rs_common::{DEFAULT_FUNCTION, PROBE_NAME};
 use tokio::signal;
+
+#[derive(Parser)]
+struct Opts {
+    #[clap(short, long, default_value = DEFAULT_FUNCTION)]
+    function: String,
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let opts = Opts::parse();
     env_logger::init();
 
     // Bump the memlock rlimit. This is needed for older kernels that don't use the
@@ -18,39 +27,48 @@ async fn main() -> anyhow::Result<()> {
         debug!("remove limit on locked memory failed, ret is: {ret}");
     }
 
-    // This will include your eBPF object file as raw bytes at compile-time and load it at
-    // runtime. This approach is recommended for most real-world use cases. If you would
-    // like to specify the eBPF program at runtime rather than at compile-time, you can
-    // reach for `Bpf::load_file` instead.
     let mut ebpf = aya::Ebpf::load(aya::include_bytes_aligned!(concat!(
         env!("OUT_DIR"),
         "/packet-watcher-rs"
-    )))?;
-    match aya_log::EbpfLogger::init(&mut ebpf) {
-        Err(e) => {
-            // This can happen if you remove all log statements from your eBPF program.
-            warn!("failed to initialize eBPF logger: {e}");
-        }
-        Ok(logger) => {
-            let mut logger =
-                tokio::io::unix::AsyncFd::with_interest(logger, tokio::io::Interest::READABLE)?;
-            tokio::task::spawn(async move {
-                loop {
-                    let mut guard = logger.readable_mut().await.unwrap();
-                    guard.get_inner_mut().flush();
-                    guard.clear_ready();
-                }
-            });
-        }
-    }
-    let program: &mut KProbe = ebpf.program_mut("packet_watcher_rs").unwrap().try_into()?;
-    program.load()?;
-    program.attach("tcp_recvmsg", 0)?;
+    )))
+    .context("failed to load eBPF object")?;
 
-    let ctrl_c = signal::ctrl_c();
-    println!("Waiting for Ctrl-C...");
-    ctrl_c.await?;
+    if let Err(e) = setup_ebpf_logging(&mut ebpf) {
+        warn!("failed to initialize eBPF logger: {e}");
+    }
+
+    let program: &mut KProbe = ebpf
+        .program_mut(PROBE_NAME)
+        .with_context(|| format!("failed to find program '{}'", PROBE_NAME))?
+        .try_into()
+        .context("failed to cast program to KProbe")?;
+
+    program.load().context("failed to load kprobe")?;
+    program
+        .attach(&opts.function, 0)
+        .with_context(|| format!("failed to attach to '{}'", opts.function))?;
+
+    println!("Waiting for Ctrl-C... Probing {}", opts.function);
+    signal::ctrl_c().await?;
     println!("Exiting...");
+
+    Ok(())
+}
+
+fn setup_ebpf_logging(ebpf: &mut aya::Ebpf) -> anyhow::Result<()> {
+    let logger = aya_log::EbpfLogger::init(ebpf).context("failed to init EbpfLogger")?;
+    let mut async_fd =
+        tokio::io::unix::AsyncFd::with_interest(logger, tokio::io::Interest::READABLE)
+            .context("failed to create AsyncFd for logger")?;
+
+    tokio::task::spawn(async move {
+        loop {
+            if let Ok(mut guard) = async_fd.readable_mut().await {
+                guard.get_inner_mut().flush();
+                guard.clear_ready();
+            }
+        }
+    });
 
     Ok(())
 }

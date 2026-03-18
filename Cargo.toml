@@ -31,5 +31,6 @@ tokio = { version = "1.40.0", default-features = false }
 which = { version = "6.0.0", default-features = false }
 
 [profile.release.package.packet-watcher-rs-ebpf]
-debug = 2
+debug = 1
 codegen-units = 1
+
