@@ -52,7 +52,6 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}
 }
 
-// Aligned to 16 bytes to satisfy the BTF verifier while keeping your license text
 #[unsafe(link_section = "license")]
 #[unsafe(no_mangle)]
 static LICENSE: [u8; 13] = *b"Dual MIT/GPL\0";

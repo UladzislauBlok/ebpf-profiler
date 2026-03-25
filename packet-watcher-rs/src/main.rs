@@ -1,8 +1,11 @@
+mod forwarder;
+mod reporter;
+
 use anyhow::Context;
 use aya::programs::KProbe;
 use clap::Parser;
-use log::{debug, warn};
-use packet_watcher_rs_common::{DEFAULT_FUNCTION, PROBE_NAME};
+use log::{debug, error, info, warn};
+use packet_watcher_rs_common::{DEFAULT_FUNCTION, DEFAULT_MAP_NAME, PROBE_NAME};
 use tokio::signal;
 
 #[derive(Parser)]
@@ -48,9 +51,18 @@ async fn main() -> anyhow::Result<()> {
         .attach(&opts.function, 0)
         .with_context(|| format!("failed to attach to '{}'", opts.function))?;
 
-    println!("Waiting for Ctrl-C... Probing {}", opts.function);
+    let map = ebpf
+        .take_map(DEFAULT_MAP_NAME)
+        .context("failed to find BYTES_PER_CPU map")?;
+    tokio::spawn(async move {
+        if let Err(e) = reporter::run(&map).await {
+            error!("Reporter task error: {e}");
+        }
+    });
+
+    info!("Waiting for Ctrl-C... Probing {}", opts.function);
     signal::ctrl_c().await?;
-    println!("Exiting...");
+    info!("Exiting...");
 
     Ok(())
 }
