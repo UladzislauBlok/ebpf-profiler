@@ -3,15 +3,14 @@
 
 use aya_ebpf::{
     macros::{kretprobe, map},
-    maps::PerCpuHashMap,
+    maps::PerCpuArray,
     programs::RetProbeContext,
 };
 use aya_log_ebpf::error;
 use packet_watcher_rs_common::PacketStats;
 
 #[map]
-static BYTES_PER_CPU: PerCpuHashMap<u32, PacketStats> =
-    PerCpuHashMap::<u32, PacketStats>::with_max_entries(32, 0);
+static BYTES_PER_CPU: PerCpuArray<PacketStats> = PerCpuArray::with_max_entries(1, 0);
 
 #[kretprobe]
 pub fn paccher_rs(ctx: RetProbeContext) -> u32 {
@@ -24,15 +23,10 @@ pub fn paccher_rs(ctx: RetProbeContext) -> u32 {
     }
 }
 
-fn put_bytes(new_bytes: u64) -> Result<(), i32> {
-    let key = 0;
-    let mut stats = match { BYTES_PER_CPU.get_ptr_mut(&key) } {
-        Some(ptr) => unsafe { *ptr },
-        None => PacketStats { bytes: 0 },
-    };
-
-    stats.bytes += new_bytes;
-    BYTES_PER_CPU.insert(&key, &stats, 0)
+fn put_bytes(new_bytes: u64) -> Result<(), ()> {
+    let stats = BYTES_PER_CPU.get_ptr_mut(0).ok_or(())?;
+    unsafe { (*stats).bytes += new_bytes };
+    Ok(())
 }
 
 fn try_packet_watcher_rs(ctx: &RetProbeContext) -> Result<u32, u32> {
@@ -40,10 +34,8 @@ fn try_packet_watcher_rs(ctx: &RetProbeContext) -> Result<u32, u32> {
     if bytes <= 0 {
         return Ok(0);
     }
-    match put_bytes(bytes as u64) {
-        Ok(()) => Ok(0),
-        Err(_) => Err(1),
-    }
+    put_bytes(bytes as u64).map_err(|()| 1u32)?;
+    Ok(0)
 }
 
 #[cfg(not(test))]

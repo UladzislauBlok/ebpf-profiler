@@ -1,4 +1,3 @@
-mod forwarder;
 mod reporter;
 
 use anyhow::Context;
