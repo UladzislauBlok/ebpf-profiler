@@ -14,7 +14,7 @@ pub async fn run(map: &Map) -> anyhow::Result<()> {
             Ok((mut socket, addr)) => {
                 debug!("Open connection from {}", addr);
                 let mut body = String::new();
-                
+
                 for func in WatchedFunction::all() {
                     let index = *func as u32;
                     match stats_map.get(&index, 0) {
@@ -22,16 +22,20 @@ pub async fn run(map: &Map) -> anyhow::Result<()> {
                             let total_bytes: u64 = cpu_stats.iter().map(|s| s.bytes).sum();
                             body.push_str(&format!(
                                 "packet_watcher_bytes_total{{function=\"{}\"}} {}\n",
-                                func.function_name(),
+                                func.kernel_func_name(),
                                 total_bytes
                             ));
                         }
                         Err(e) => {
-                            error!("Failed to read stats for {}: {}", func.function_name(), e);
+                            error!(
+                                "Failed to read stats for {}: {}",
+                                func.kernel_func_name(),
+                                e
+                            );
                         }
                     }
                 }
-                
+
                 if let Err(e) = send_response(&body, &mut socket).await {
                     error!("Failed to send response: {}", e);
                 }

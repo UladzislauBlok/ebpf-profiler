@@ -1,7 +1,7 @@
 mod reporter;
 
 use anyhow::Context;
-use aya::programs::KProbe;
+use aya::programs::FExit;
 use log::{debug, error, info, warn};
 use packet_watcher_rs_common::{STATS_MAP_NAME, WatchedFunction};
 use tokio::signal;
@@ -27,23 +27,27 @@ async fn main() -> anyhow::Result<()> {
     )))
     .context("failed to load eBPF object")?;
 
+    let btf = aya::Btf::from_sys_fs()?;
+
     if let Err(e) = setup_ebpf_logging(&mut ebpf) {
         warn!("failed to initialize eBPF logger: {e}");
     }
 
     for func in WatchedFunction::all() {
-        let program: &mut KProbe = ebpf
-            .program_mut(func.probe_name())
-            .with_context(|| format!("failed to find program '{}'", func.probe_name()))?
+        let program: &mut FExit = ebpf
+            .program_mut(func.fexit_func_name())
+            .with_context(|| format!("failed to find program '{}'", func.fexit_func_name()))?
             .try_into()
             .context("failed to cast program to KProbe")?;
 
-        program.load().context("failed to load kprobe")?;
         program
-            .attach(func.function_name(), 0)
-            .with_context(|| format!("failed to attach to '{}'", func.function_name()))?;
+            .load(func.kernel_func_name(), &btf)
+            .context("failed to load kprobe")?;
+        program
+            .attach()
+            .with_context(|| format!("failed to attach to '{}'", func.kernel_func_name()))?;
 
-        info!("Attached probe for {}", func.function_name());
+        info!("Attached probe for {}", func.kernel_func_name());
     }
 
     let map = ebpf

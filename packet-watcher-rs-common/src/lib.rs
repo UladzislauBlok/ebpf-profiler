@@ -23,7 +23,7 @@ pub enum WatchedFunction {
 impl WatchedFunction {
     pub const COUNT: u32 = 4;
 
-    pub const fn function_name(&self) -> &'static str {
+    pub const fn kernel_func_name(&self) -> &'static str {
         match self {
             WatchedFunction::TcpSendmsg => "tcp_sendmsg",
             WatchedFunction::TcpRecvmsg => "tcp_recvmsg",
@@ -33,12 +33,12 @@ impl WatchedFunction {
     }
 
     /// These names must match the function names defined in the eBPF program
-    pub const fn probe_name(&self) -> &'static str {
+    pub const fn fexit_func_name(&self) -> &'static str {
         match self {
-            WatchedFunction::TcpSendmsg => "tcp_sendmsg_probe",
-            WatchedFunction::TcpRecvmsg => "tcp_recvmsg_probe",
-            WatchedFunction::UdpSendmsg => "udp_sendmsg_probe",
-            WatchedFunction::UdpRecvmsg => "udp_recvmsg_probe",
+            WatchedFunction::TcpSendmsg => "tcp_sendmsg_fexit",
+            WatchedFunction::TcpRecvmsg => "tcp_recvmsg_fexit",
+            WatchedFunction::UdpSendmsg => "udp_sendmsg_fexit",
+            WatchedFunction::UdpRecvmsg => "udp_recvmsg_fexit",
         }
     }
 
