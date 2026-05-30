@@ -1,11 +1,32 @@
 #![no_std]
 
 pub const STATS_MAP_NAME: &str = "STATS";
+pub const AF_INET: u16 = 2;
+pub const AF_INET6: u16 = 10;
 
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub struct PacketStats {
-    pub bytes: u64,
+    pub connection_info: ConnectionInfo,
+    pub bytes: i32,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct ConnectionInfo {
+    pub family: u16,
+    pub src_ip: IpAddress,
+    pub dst_ip: IpAddress,
+    pub src_port: u16,
+    pub dst_port: u16,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub enum IpAddress {
+    V4([u8; 4]),
+    V6([u8; 16]),
+    Unknown,
 }
 
 #[cfg(feature = "user")]

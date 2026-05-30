@@ -1,7 +1,7 @@
 use aya::maps::Map;
 use aya::maps::PerCpuArray;
 use log::{debug, error};
-use packet_watcher_rs_common::{PacketStats, WatchedFunction};
+use packet_watcher_rs_common::{AF_INET, AF_INET6, IpAddress, PacketStats, WatchedFunction};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
@@ -19,12 +19,27 @@ pub async fn run(map: &Map) -> anyhow::Result<()> {
                     let index = *func as u32;
                     match stats_map.get(&index, 0) {
                         Ok(cpu_stats) => {
-                            let total_bytes: u64 = cpu_stats.iter().map(|s| s.bytes).sum();
-                            body.push_str(&format!(
-                                "packet_watcher_bytes_total{{function=\"{}\"}} {}\n",
-                                func.kernel_func_name(),
-                                total_bytes
-                            ));
+                            for (cpu_id, stats) in cpu_stats.iter().enumerate() {
+                                let conn = &stats.connection_info;
+                                if conn.family == AF_INET || conn.family == AF_INET6 {
+                                    let family_str = if conn.family == AF_INET {
+                                        "IPv4"
+                                    } else {
+                                        "IPv6"
+                                    };
+                                    body.push_str(&format!(
+                                        "packet_watcher_last_connection{{function=\"{}\",cpu=\"{}\",family=\"{}\",src=\"{}:{}\",dst=\"{}:{}\"}} {}\n",
+                                        func.kernel_func_name(),
+                                        cpu_id,
+                                        family_str,
+                                        format_ip(&conn.src_ip),
+                                        conn.src_port,
+                                        format_ip(&conn.dst_ip),
+                                        conn.dst_port,
+                                        stats.bytes
+                                    ));
+                                }
+                            }
                         }
                         Err(e) => {
                             error!(
@@ -53,4 +68,32 @@ async fn send_response(body: &str, socket: &mut TcpStream) -> anyhow::Result<()>
     );
     debug!("Try to send response \n{}", response);
     Ok(socket.write_all(response.as_bytes()).await?)
+}
+
+fn format_ip(ip: &IpAddress) -> String {
+    match ip {
+        IpAddress::V4(octets) => format!("{}.{}.{}.{}", octets[0], octets[1], octets[2], octets[3]),
+        IpAddress::V6(octets) => {
+            format!(
+                "{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}",
+                octets[0],
+                octets[1],
+                octets[2],
+                octets[3],
+                octets[4],
+                octets[5],
+                octets[6],
+                octets[7],
+                octets[8],
+                octets[9],
+                octets[10],
+                octets[11],
+                octets[12],
+                octets[13],
+                octets[14],
+                octets[15]
+            )
+        }
+        IpAddress::Unknown => "unknown".to_string(),
+    }
 }
