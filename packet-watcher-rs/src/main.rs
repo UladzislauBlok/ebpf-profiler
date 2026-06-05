@@ -1,9 +1,7 @@
-mod reporter;
-
 use anyhow::Context;
 use aya::programs::FExit;
-use log::{debug, error, info, warn};
-use packet_watcher_rs_common::{STATS_MAP_NAME, WatchedFunction};
+use log::{debug, info, warn};
+use packet_watcher_rs_common::{RING_BUF_NAME, WatchedFunction};
 use tokio::signal;
 
 #[tokio::main]
@@ -51,12 +49,29 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let map = ebpf
-        .take_map(STATS_MAP_NAME)
-        .context(format!("failed to find {} map", STATS_MAP_NAME))?;
+        .take_map(RING_BUF_NAME)
+        .context(format!("failed to find {} map", RING_BUF_NAME))?;
+    let ring_buf = aya::maps::RingBuf::try_from(map).context("failed to convert map to RingBuf")?;
+    let mut async_fd =
+        tokio::io::unix::AsyncFd::new(ring_buf).context("failed to create AsyncFd")?;
 
     tokio::spawn(async move {
-        if let Err(e) = reporter::run(&map).await {
-            error!("Reporter task error: {e}");
+        loop {
+            if let Ok(mut guard) = async_fd.readable_mut().await {
+                let rb = guard.get_inner_mut();
+                while let Some(item) = rb.next() {
+                    let stats = unsafe {
+                        std::ptr::read_unaligned(
+                            item.as_ptr() as *const packet_watcher_rs_common::PacketStats
+                        )
+                    };
+                    info!(
+                        "Event: bytes = {}, function = {}",
+                        stats.bytes, stats.function
+                    );
+                }
+                guard.clear_ready();
+            }
         }
     });
 

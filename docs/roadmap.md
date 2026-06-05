@@ -10,8 +10,6 @@ _Goal: Master socket-layer observability and eBPF state management. Move from gl
       _Note:_ Gets data out of the kernel using eBPF maps and serves it. I will learn how user-space and kernel-space share data safely.
 - [x] Add `fexit` (entry hooks) to these functions to extract the 4-tuple (Source IP, Source Port, Dest IP, Dest Port) from `struct sock`.
       _Note:_ I will learn how to safely navigate kernel memory to read IP addresses.
-- [ ] Transition from the global `STATS` array to a Hash Map, tracking bytes sent/received per IP/Port pair rather than globally.
-      _Note:_ Moves from aggregate counts to granular, connection-specific observability.
 - [ ] Replace map polling with an eBPF Ring Buffer to stream "connection started" and "connection closed" events to user-space asynchronously.
       _Note:_ Essential for high-performance, real-time event streaming without constantly locking or polling maps.
 
