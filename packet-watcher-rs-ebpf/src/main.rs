@@ -22,7 +22,7 @@ use vmlinux::sock;
 /// - Capacity estimate: 10,000 events/sec * 64 bytes * 10 sec = 6,400,000 bytes.
 /// - Chosen size: 8,388,608 bytes (8 MB, power of 2, page-aligned).
 #[btf_map(name = "PACKET_STATS_PIPE")]
-static STATS: RingBuf<PacketStats, 8388608, 0> = RingBuf::new();
+static PACKER_STATS_PIPE: RingBuf<PacketStats, 8388608, 0> = RingBuf::new();
 
 /// Probes the exit of `tcp_sendmsg` to capture TCP transmission statistics.
 ///
@@ -200,7 +200,7 @@ fn read_ports(sk_ptr: *const sock) -> Result<(u16, u16), i32> {
 }
 
 fn pipe_packet_stats(function: u16, bytes: i32, connection_info: ConnectionInfo) -> Result<(), ()> {
-    if let Some(mut entry) = STATS.reserve(0) {
+    if let Some(mut entry) = PACKER_STATS_PIPE.reserve(0) {
         entry.write(PacketStats {
             connection_info,
             bytes,
