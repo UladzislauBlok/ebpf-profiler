@@ -1,3 +1,5 @@
+mod ingestor;
+
 use anyhow::Context;
 use aya::programs::FExit;
 use log::{debug, info, warn};
@@ -51,29 +53,10 @@ async fn main() -> anyhow::Result<()> {
     let map = ebpf
         .take_map(RING_BUF_NAME)
         .context(format!("failed to find {} map", RING_BUF_NAME))?;
-    let ring_buf = aya::maps::RingBuf::try_from(map).context("failed to convert map to RingBuf")?;
-    let mut async_fd =
-        tokio::io::unix::AsyncFd::new(ring_buf).context("failed to create AsyncFd")?;
 
-    tokio::spawn(async move {
-        loop {
-            if let Ok(mut guard) = async_fd.readable_mut().await {
-                let rb = guard.get_inner_mut();
-                while let Some(item) = rb.next() {
-                    let stats = unsafe {
-                        std::ptr::read_unaligned(
-                            item.as_ptr() as *const packet_watcher_rs_common::PacketStats
-                        )
-                    };
-                    info!(
-                        "Event: bytes = {}, function = {}",
-                        stats.bytes, stats.function
-                    );
-                }
-                guard.clear_ready();
-            }
-        }
-    });
+    if let Err(e) = ingestor::start(map).await {
+        warn!("Ingestor error: {e:#}");
+    }
 
     info!("Waiting for Ctrl-C...");
     signal::ctrl_c().await?;

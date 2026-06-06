@@ -11,6 +11,7 @@ use packet_watcher_rs_common::{
     AF_INET, AF_INET6, ConnectionInfo, IpAddress, PacketStats, WatchedFunction,
 };
 
+#[allow(warnings)]
 mod vmlinux;
 use vmlinux::sock;
 

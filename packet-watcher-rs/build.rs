@@ -23,5 +23,7 @@ fn main() -> anyhow::Result<()> {
             .as_str(),
         ..Default::default()
     };
-    aya_build::build_ebpf([ebpf_package], Toolchain::default())
+    aya_build::build_ebpf([ebpf_package], Toolchain::default())?;
+    prost_build::compile_protos(&["../proto/network_event.proto"], &["../proto"])?;
+    Ok(())
 }
