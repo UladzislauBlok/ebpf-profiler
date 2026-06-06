@@ -4,11 +4,11 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use anyhow::Context;
 use aya::maps::{Map, MapData, RingBuf};
-use log::info;
+use log::{debug, error};
 use packet_watcher_rs_common::{AF_INET, AF_INET6, IpAddress, PacketStats, WatchedFunction};
 use prost::Message;
 use tokio::io::unix::AsyncFd;
-use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::mpsc::{self, Receiver, Sender, error::TrySendError};
 
 pub mod proto {
     include!(concat!(env!("OUT_DIR"), "/proto.rs"));
@@ -19,24 +19,40 @@ use proto::NetworkEvent;
 
 pub async fn start(map: Map) -> Result<(), anyhow::Error> {
     let ring_buf = RingBuf::try_from(map).context("failed to convert map to RingBuf")?;
-    let (tx, rx) = mpsc::channel::<Vec<u8>>(50_000);
+    let (event_tx, event_rx) = mpsc::channel::<PacketStats>(100_000); // 10_000 RPS * 10sec
     let async_fd = AsyncFd::new(ring_buf).context("failed to create AsyncFd")?;
-    create_buffer_reader(tx, async_fd);
-    create_file_writer(rx);
+    spawn_ebpf_reader(event_tx, async_fd);
+    spawn_file_writer(event_rx);
     Ok(())
 }
 
-fn create_buffer_reader(
-    user_space_buffer: Sender<Vec<u8>>,
-    mut async_fd: AsyncFd<RingBuf<MapData>>,
-) {
+fn spawn_ebpf_reader(event_tx: Sender<PacketStats>, mut async_fd: AsyncFd<RingBuf<MapData>>) {
     tokio::spawn(async move {
         loop {
             if let Ok(mut guard) = async_fd.readable_mut().await {
                 let rb = guard.get_inner_mut();
                 while let Some(item) = rb.next() {
-                    if user_space_buffer.try_send(item.to_vec()).is_err() {
-                        // Drop if channel is full to preserve engine stability
+                    if item.len() != std::mem::size_of::<PacketStats>() {
+                        continue;
+                    }
+
+                    let packet_stats: PacketStats =
+                        unsafe { std::ptr::read_unaligned(item.as_ptr() as *const PacketStats) };
+
+                    if let Err(err) = event_tx.try_send(packet_stats) {
+                        match err {
+                            TrySendError::Full(_) => {
+                                debug!(
+                                    "Channel is full. Dropping packet to preserve eBPF reader speed."
+                                );
+                            }
+                            TrySendError::Closed(_) => {
+                                error!(
+                                    "Event channel closed unexpectedly. Shutting down reader task."
+                                );
+                                return;
+                            }
+                        }
                     }
                 }
                 guard.clear_ready();
@@ -45,7 +61,7 @@ fn create_buffer_reader(
     });
 }
 
-fn create_file_writer(mut user_space_buffer: Receiver<Vec<u8>>) {
+fn spawn_file_writer(mut event_rx: Receiver<PacketStats>) {
     std::thread::spawn(move || {
         let file = OpenOptions::new()
             .create(true)
@@ -56,37 +72,37 @@ fn create_file_writer(mut user_space_buffer: Receiver<Vec<u8>>) {
 
         let mut proto_buffer = Vec::new();
 
-        while let Some(raw_bytes) = user_space_buffer.blocking_recv() {
-            if raw_bytes.len() != std::mem::size_of::<PacketStats>() {
-                continue;
-            }
-
-            let c_event = unsafe { &*(raw_bytes.as_ptr() as *const PacketStats) };
-
+        while let Some(packet_stats) = event_rx.blocking_recv() {
             let proto_event = NetworkEvent {
                 connection_info: Some(ConnectionInfo {
-                    family: format_family(c_event.connection_info.family),
-                    src_ip: format_ip(&c_event.connection_info.src_ip),
-                    dst_ip: format_ip(&c_event.connection_info.dst_ip),
-                    src_port: c_event.connection_info.src_port as u32,
-                    dst_port: c_event.connection_info.dst_port as u32,
+                    family: format_family(packet_stats.connection_info.family),
+                    src_ip: format_ip(&packet_stats.connection_info.src_ip),
+                    dst_ip: format_ip(&packet_stats.connection_info.dst_ip),
+                    src_port: packet_stats.connection_info.src_port as u32,
+                    dst_port: packet_stats.connection_info.dst_port as u32,
                 }),
-                bytes: c_event.bytes,
-                function: format_function(c_event.function),
+                bytes: packet_stats.bytes,
+                function: format_function(packet_stats.function),
             };
 
-            info!("Event: {:#?}", proto_event);
+            debug!("Event: {:#?}", proto_event);
 
             proto_buffer.clear();
             proto_event.encode(&mut proto_buffer).unwrap();
 
             let proto_len = proto_buffer.len() as u32;
 
-            let _ = writer.write_all(&proto_len.to_be_bytes());
-            let _ = writer.write_all(&proto_buffer);
+            if let Err(e) = writer.write_all(&proto_len.to_be_bytes()) {
+                error!("Failed to write length to disk: {}", e);
+            }
+            if let Err(e) = writer.write_all(&proto_buffer) {
+                error!("Failed to write protobuf data to disk: {}", e);
+            }
         }
 
-        let _ = writer.flush();
+        if let Err(e) = writer.flush() {
+            error!("Failed to flush writer to disk: {}", e);
+        }
     });
 }
 
