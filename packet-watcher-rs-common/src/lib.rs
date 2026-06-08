@@ -53,10 +53,12 @@ pub enum WatchedFunction {
     TcpRecvmsg = 1,
     UdpSendmsg = 2,
     UdpRecvmsg = 3,
+    Udpv6Sendmsg = 4,
+    Udpv6Recvmsg = 5,
 }
 
 impl WatchedFunction {
-    pub const COUNT: u16 = 4;
+    pub const COUNT: u16 = 6;
 
     pub const fn kernel_func_name(&self) -> &'static str {
         match self {
@@ -64,6 +66,8 @@ impl WatchedFunction {
             WatchedFunction::TcpRecvmsg => "tcp_recvmsg",
             WatchedFunction::UdpSendmsg => "udp_sendmsg",
             WatchedFunction::UdpRecvmsg => "udp_recvmsg",
+            WatchedFunction::Udpv6Sendmsg => "udpv6_sendmsg",
+            WatchedFunction::Udpv6Recvmsg => "udpv6_recvmsg",
         }
     }
 
@@ -74,6 +78,8 @@ impl WatchedFunction {
             WatchedFunction::TcpRecvmsg => "tcp_recvmsg_fexit",
             WatchedFunction::UdpSendmsg => "udp_sendmsg_fexit",
             WatchedFunction::UdpRecvmsg => "udp_recvmsg_fexit",
+            WatchedFunction::Udpv6Sendmsg => "udpv6_sendmsg_fexit",
+            WatchedFunction::Udpv6Recvmsg => "udpv6_recvmsg_fexit",
         }
     }
 
@@ -83,6 +89,8 @@ impl WatchedFunction {
             WatchedFunction::TcpRecvmsg,
             WatchedFunction::UdpSendmsg,
             WatchedFunction::UdpRecvmsg,
+            WatchedFunction::Udpv6Sendmsg,
+            WatchedFunction::Udpv6Recvmsg,
         ]
     }
 }

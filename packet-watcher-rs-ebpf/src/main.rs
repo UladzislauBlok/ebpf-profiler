@@ -73,7 +73,7 @@ fn tcp_recvmsg_fexit(ctx: FExitContext) -> u32 {
     }
 }
 
-/// Probes the exit of `udp_sendmsg` to capture UDP transmission statistics.
+/// Probes the exit of `udp_sendmsg` to capture UDP IPv4 transmission statistics.
 ///
 /// Kernel function signature:
 /// `int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)`
@@ -97,7 +97,7 @@ fn udp_sendmsg_fexit(ctx: FExitContext) -> u32 {
     }
 }
 
-/// Probes the exit of `udp_recvmsg` to capture UDP transmission statistics.
+/// Probes the exit of `udp_recvmsg` to capture UDP IPv4 transmission statistics.
 ///
 /// Kernel function signature:
 /// `int udp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags, int *addr_len)`
@@ -116,6 +116,54 @@ fn udp_recvmsg_fexit(ctx: FExitContext) -> u32 {
         Ok(ret) => ret,
         Err(ret) => {
             error!(&ctx, "Error in udp_recvmsg_probe: {}", ret);
+            ret.try_into().unwrap_or(1)
+        }
+    }
+}
+
+/// Probes the exit of `udpv6_sendmsg` to capture UDP IPv6 transmission statistics.
+///
+/// Kernel function signature:
+/// `int udpv6_sendmsg(struct sock *sk, struct msghdr *msg, size_t len);`
+///
+/// Kernel version: v7.0.11
+/// Docs: https://elixir.bootlin.com/linux/v7.0.11/source/net/ipv6/udp_impl.h
+///
+/// In the `fexit` program context:
+/// - `ctx.arg(0)` is the `sk` pointer (`struct sock *`).
+/// - `ctx.arg(3)` is the return value representing the bytes sent.
+#[fexit]
+fn udpv6_sendmsg_fexit(ctx: FExitContext) -> u32 {
+    let sk_ptr: *const sock = ctx.arg(0);
+    let bytes: i32 = ctx.arg(3);
+    match intercept_packet(sk_ptr, bytes, WatchedFunction::Udpv6Sendmsg as u16) {
+        Ok(ret) => ret,
+        Err(ret) => {
+            error!(&ctx, "Error in udpv6_sendmsg_probe: {}", ret);
+            ret.try_into().unwrap_or(1)
+        }
+    }
+}
+
+/// Probes the exit of `udpv6_recvmsg` to capture UDP IPv6 transmission statistics.
+///
+/// Kernel function signature:
+/// `int udpv6_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags, int *addr_len);`
+///
+/// Kernel version: v7.0.11
+/// Docs: https://elixir.bootlin.com/linux/v7.0.11/source/net/ipv6/udp_impl.h
+///
+/// In the `fexit` program context:
+/// - `ctx.arg(0)` is the `sk` pointer (`struct sock *`).
+/// - `ctx.arg(5)` is the return value representing the bytes received.
+#[fexit]
+fn udpv6_recvmsg_fexit(ctx: FExitContext) -> u32 {
+    let sk_ptr: *const sock = ctx.arg(0);
+    let bytes: i32 = ctx.arg(5);
+    match intercept_packet(sk_ptr, bytes, WatchedFunction::Udpv6Recvmsg as u16) {
+        Ok(ret) => ret,
+        Err(ret) => {
+            error!(&ctx, "Error in udpv6_recvmsg_probe: {}", ret);
             ret.try_into().unwrap_or(1)
         }
     }
