@@ -2,16 +2,12 @@ syntax = "proto3";
 
 package proto;
 
-message ConnectionInfo {
-  string family = 1;      // "IPv4" or "IPv6"
-  string src_ip = 2;      // Formatted IP e.g. "192.168.1.1" or "2001:db8::1"
-  string dst_ip = 3;      // Formatted IP
-  uint32 src_port = 4;
-  uint32 dst_port = 5;
-}
-
-message NetworkEvent {
-  ConnectionInfo connection_info = 1;
-  int32 bytes = 2;
-  string function = 3;    // Function name e.g. "tcp_sendmsg"
+message DnsEvent {
+  string src_ip = 1;
+  string dst_ip = 2;
+  uint32 src_port = 3;
+  uint32 dst_port = 4;
+  string domain_name = 5;
+  optional string resolved_ip = 6;
+  bool is_response = 7;
 }

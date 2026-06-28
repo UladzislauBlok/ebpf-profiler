@@ -1,17 +1,16 @@
 mod ingestor;
 
 use anyhow::Context;
-use aya::programs::FExit;
+use aya::programs::{tc, SchedClassifier, TcAttachType};
 use log::{debug, info, warn};
-use packet_watcher_rs_common::{RING_BUF_NAME, WatchedFunction};
+use packet_watcher_rs_common::RING_BUF_NAME;
 use tokio::signal;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
 
-    // Bump the memlock rlimit. This is needed for older kernels that don't use the
-    // new memcg based accounting, see https://lwn.net/Articles/837122/
+    // Bump the memlock rlimit
     let rlim = libc::rlimit {
         rlim_cur: libc::RLIM_INFINITY,
         rlim_max: libc::RLIM_INFINITY,
@@ -27,28 +26,30 @@ async fn main() -> anyhow::Result<()> {
     )))
     .context("failed to load eBPF object")?;
 
-    let btf = aya::Btf::from_sys_fs()?;
-
     if let Err(e) = setup_ebpf_logging(&mut ebpf) {
         warn!("failed to initialize eBPF logger: {e}");
     }
 
-    for func in WatchedFunction::all() {
-        let program: &mut FExit = ebpf
-            .program_mut(func.fexit_func_name())
-            .with_context(|| format!("failed to find program '{}'", func.fexit_func_name()))?
-            .try_into()
-            .context("failed to cast program to KProbe")?;
-
-        program
-            .load(func.kernel_func_name(), &btf)
-            .context("failed to load kprobe")?;
-        program
-            .attach()
-            .with_context(|| format!("failed to attach to '{}'", func.kernel_func_name()))?;
-
-        info!("Attached probe for {}", func.kernel_func_name());
-    }
+    // Attach TC Program
+    // Note: 'lo' (loopback) or 'eth0' can be used depending on your test environment.
+    let iface = "lo"; 
+    
+    // Ensure clsact qdisc is added to the interface
+    let _ = tc::qdisc_add_clsact(iface);
+    
+    let program: &mut SchedClassifier = ebpf
+        .program_mut("packet_watcher_tc")
+        .context("failed to find program 'packet_watcher_tc'")?
+        .try_into()
+        .context("failed to cast program to SchedClassifier")?;
+        
+    program.load().context("failed to load tc program")?;
+    
+    // Attach to ingress and egress
+    program.attach(iface, TcAttachType::Ingress).context("failed to attach tc ingress")?;
+    program.attach(iface, TcAttachType::Egress).context("failed to attach tc egress")?;
+    
+    info!("Attached TC program to {}", iface);
 
     let map = ebpf
         .take_map(RING_BUF_NAME)

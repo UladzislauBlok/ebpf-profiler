@@ -1,66 +1,48 @@
-# Roadmap
+# Roadmap: Dataplane V2 Interview Prep (DNS & FQDN Policies)
 
-## Phase 1: L4 Transport Foundations
+This roadmap is tailored for a deep-dive into Kubernetes Dataplane V2 (Cilium) architecture. It abandons broad generalities to focus entirely on building a high-performance, verifier-safe DNS inspector and dynamic FQDN network policy engine using eBPF Traffic Control (TC).
+
+## Phase 1: L4 Transport Foundations (Completed)
 
 _Goal: Master socket-layer observability and eBPF state management. Move from global counters to connection-aware metrics._
 
 - [x] Attach kprobes to `tcp_sendmsg`, `tcp_recvmsg`, `udp_sendmsg`, and `udp_recvmsg`.
-      _Note:_ Hooks into the kernel functions called when applications send/receive data. I will learn basic eBPF program attachment and how to read function arguments.
 - [x] Export basic packet and byte metrics to user-space via an HTTP endpoint.
-      _Note:_ Gets data out of the kernel using eBPF maps and serves it. I will learn how user-space and kernel-space share data safely.
 - [x] Add `fexit` (entry hooks) to these functions to extract the 4-tuple (Source IP, Source Port, Dest IP, Dest Port) from `struct sock`.
-      _Note:_ I will learn how to safely navigate kernel memory to read IP addresses.
 - [x] Replace map polling with an eBPF Ring Buffer to stream "connection started" and "connection closed" events to user-space asynchronously.
-      _Note:_ Essential for high-performance, real-time event streaming without constantly locking or polling maps.
 
-## Phase 2: Workload Identity & Container Context
+## Phase 2: DNS DPI via Traffic Control (TC) & Fast-Path
 
-_Goal: Understand how the Linux kernel isolates network traffic for containers using namespaces and cgroups._
+_Goal: Safely parse packet payloads directly from the network interface using TC, implementing early-exits to achieve zero-overhead monitoring._
 
-- [ ] Extract the Network Namespace (netns) ID from `struct sock` to identify container boundaries.
-      _Note:_ A Network Namespace gives a container its own isolated network stack. By reading the `netns` ID, I can definitively prove which container environment generated the traffic.
-- [ ] Read cgroup IDs to attribute network traffic to specific workloads.
-      _Note:_ Control Groups (cgroups) isolate resource usage. Reading the `cgroup` ID allows me to tie network activity back to the specific container runtime's workload.
-- [ ] Correlate process data (PID, command name) with network socket events.
-      _Note:_ Uses `bpf_get_current_comm()` to get the executable name. I will learn how to enrich raw network bytes with process-level context.
-- [ ] Build a user-space cache that simulates a Container Runtime Interface, matching cgroup IDs to dummy container names for enriched metric output.
-      _Note:_ Bridges the gap between raw kernel IDs and higher-level metadata.
+- [ ] Transition to **TC (`clsact`) ingress hooks**.
+- [ ] Implement **Fast-Path Early Exits**: Write highly optimized header parsing (Ethernet $\to$ IP $\to$ UDP/TCP) that immediately returns `TC_ACT_OK` for any non-port-53 traffic, reducing per-packet overhead to mere nanoseconds.
+- [ ] Build a verifier-safe DNS Header parser (extracting Transaction ID, Flags, Question/Answer count).
+- [ ] **The Verifier Challenge**: Implement bounded loops (e.g., `#pragma unroll` equivalents in Rust) to safely parse the variable-length, length-prefixed DNS domain name labels (e.g., `[3]www[6]google[3]com[0]`) without failing the eBPF static analyzer.
+- [ ] Extract resolved IP addresses from the DNS Response `Answer` section.
+- [ ] Stream the extracted telemetry `(DomainName, ResolvedIP)` to user-space via the `PACKET_STATS_PIPE` Ring Buffer.
 
-## Phase 3: TCP Health & Node Reliability
+## Phase 3: Dynamic FQDN Network Policies (Dataplane V2 Core)
 
-_Goal: Move from fragile kprobes to stable tracepoints to monitor kernel TCP state._
+_Goal: Replicate Cilium's approach to domain-based network security by using DNS resolutions to dynamically populate an L3 eBPF firewall._
 
-- [ ] Hook into kernel tracepoints (e.g., `sock:inet_sock_set_state`) to monitor TCP state transitions (e.g., `ESTABLISHED`, `TIME_WAIT`).
-      _Note:_ Tracepoints are stable API hooks in the kernel. I will learn the TCP state machine and how to reliably trace kernel events without relying on unstable kprobes.
-- [ ] Track TCP retransmissions and packet drops to identify network congestion.
-      _Note:_ Hooks into `tcp_retransmit_skb` or drop tracepoints. I will learn how to pinpoint network degradation at the kernel level before the application crashes.
-- [ ] Calculate connection establishment latency (time between SYN and ACK).
-      _Note:_ Measures the exact time it takes to establish a TCP connection. I will learn how to store timestamps in eBPF maps on SYN and calculate deltas when the connection completes.
-- [ ] Measure Round Trip Time (srtt) directly from the kernel's `tcp_sock` structure.
-      _Note:_ The kernel constantly calculates Smoothed RTT (srtt). I will learn how to navigate complex C structs in Rust to extract highly valuable performance metrics.
+- [ ] Create an eBPF Hash Map (`ALLOWED_IPS_MAP`) shared between user-space and the kernel.
+- [ ] Build a user-space consumer that reads the DNS Ring Buffer. When a target domain (e.g., `api.github.com`) is resolved, insert the dynamically returned IP into the `ALLOWED_IPS_MAP`.
+- [ ] Write a secondary **TC Egress** eBPF program (the Firewall).
+- [ ] Implement an O(1) map lookup in the Egress program: For every outbound packet, check if the Destination IP exists in the `ALLOWED_IPS_MAP`.
+- [ ] Action the Firewall: Return `TC_ACT_OK` if the IP is allowed, or `TC_ACT_SHOT` (drop) if it is unauthorized.
 
-## Phase 4: High-Performance Dataplane (L2/L3 Parsing with XDP & TC)
+## Phase 4: Workload Identity & Container Attribution (GKE Integration)
 
-_Goal: Drop down from the socket layer to the driver layer. Process raw packets at millions of packets per second._
+_Goal: Attribute DNS requests and policy enforcements to specific Kubernetes Pods, moving from node-level to pod-level observability._
 
-- [ ] Write an XDP program to parse raw Ethernet, ARP, IPv4/IPv6, and ICMP headers.
-      _Note:_ eXpress Data Path (XDP) runs at the driver level. I will learn verifier-safe raw pointer arithmetic and the exact byte-structure of L2 and L3 protocols.
-- [ ] Implement a high-speed L3/L4 firewall.
-      _Note:_ Use an eBPF map to store a "blocklist" of IPs and return `XDP_DROP` for matching packets.
-- [ ] Attach an eBPF program to Traffic Control (TC) to inspect both ingress and egress traffic.
-      _Note:_ TC works for both incoming and outgoing traffic. I will learn the critical differences between XDP (ingress only, driver level) and TC (ingress/egress, qdisc level).
-- [ ] Identify Encapsulation (VXLAN / IP-in-IP) headers in raw packets.
-      _Note:_ Overlay networks route inter-node traffic using encapsulation. I will learn how to parse the "outer" IP to find the "inner" IP.
+- [ ] Extract the Network Namespace (`netns`) ID from the `__sk_buff` socket buffer to identify container boundaries.
+- [ ] Read `bpf_get_current_cgroup_id()` to associate the network traffic with container runtime cgroups.
+- [ ] Build a user-space cache mapping cgroup/netns IDs to mock Kubernetes Pod names, enabling pod-attributed DNS logging and per-pod FQDN policies.
 
-## Phase 5: L7 Deep Packet Inspection (Protocol Analysis)
+## Phase 5: High-Performance Dataplane (Encapsulation & XDP)
 
-_Goal: Revisit L7 protocols now that you have full mastery of parsing raw bytes and streaming data._
+_Goal: Understand how GKE overlay networks function and drop down to the driver layer._
 
-- [ ] Hook into socket buffers (`sk_buff`) or use XDP/TC to read actual payload data, safely handling packet fragmentation.
-      _Note:_ Moving beyond headers to the actual application data payload.
-- [ ] Implement DNS parsing: Read the binary DNS header to extract the requested domain name, Query Type (A, AAAA), and Response Code.
-      _Note:_ I will learn how to inspect L7 binary protocols.
-- [ ] Implement basic HTTP/1.1 parsing.
-      _Note:_ Detect `GET`/`POST` methods and HTTP status codes directly from the raw byte stream.
-- [ ] Replace the simple HTTP endpoint with a structured Prometheus exporter (using histograms and gauges).
-      _Note:_ Moves from basic text to an industry-standard metric format, fully integrating the rich telemetry gathered in previous phases.
+- [ ] Identify Encapsulation (VXLAN / Geneve / IP-in-IP) headers in raw packets to untangle GKE overlay network routing before parsing the inner DNS payloads.
+- [ ] Port the TC egress/ingress logic to XDP (eXpress Data Path) for extreme line-rate dropping of blocklisted IPs before the Linux networking stack even allocates an `sk_buff`.
