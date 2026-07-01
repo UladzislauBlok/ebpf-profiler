@@ -2,13 +2,21 @@
 #![no_main]
 
 use aya_ebpf::{
-    macros::{classifier, btf_map},
-    programs::TcContext,
     bindings::TC_ACT_OK,
     btf_maps::RingBuf,
+    macros::{btf_map, classifier},
+    programs::TcContext,
 };
 use aya_log_ebpf::info;
+use core::mem;
+use network_types::{
+    eth::{EthHdr, EtherType},
+    ip::{IpError, IpProto, Ipv4Hdr, Ipv6Hdr},
+    udp::UdpHdr,
+};
 use packet_watcher_rs_common::DnsEvent;
+
+static DNS_PORT: u16 = 53;
 
 // We keep vmlinux for standard kernel structs if we need them later
 #[allow(warnings)]
@@ -25,17 +33,64 @@ mod vmlinux;
 static DNS_EVENTS_PIPE: RingBuf<DnsEvent, 67108864, 0> = RingBuf::new();
 
 #[classifier]
-pub fn packet_watcher_tc(ctx: TcContext) -> i32 {
-    match try_packet_watcher_tc(ctx) {
+pub fn dns_tc(ctx: TcContext) -> i32 {
+    match try_dns_tc(ctx) {
         Ok(ret) => ret,
-        Err(ret) => ret,
+        Err(_) => TC_ACT_OK,
     }
 }
 
-fn try_packet_watcher_tc(_ctx: TcContext) -> Result<i32, i32> {
-    // Phase 2: DNS Parsing and Fast-Path logic will go here.
-    // For now, we instantly pass all packets.
+fn try_dns_tc(ctx: TcContext) -> Result<i32, ()> {
+    let ethhdr: *const EthHdr = unsafe { ptr_at(&ctx, 0)? };
+    match unsafe { *ethhdr }.ether_type() {
+        Ok(EtherType::Ipv4) => {
+            let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(&ctx, EthHdr::LEN)? };
+            match unsafe { (*ipv4hdr).proto().map_err(|_: IpError| ())? } {
+                IpProto::Tcp => return Ok(TC_ACT_OK),
+                IpProto::Udp => {
+                    let udphdr: *const UdpHdr =
+                        unsafe { ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN) }?;
+                    let port = unsafe { (*udphdr).src_port() };
+                    if port != DNS_PORT {
+                        return Ok(TC_ACT_OK);
+                    }
+                    info!(&ctx, "DNS V4");
+                }
+                _ => return Ok(TC_ACT_OK),
+            };
+        }
+        Ok(EtherType::Ipv6) => {
+            let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(&ctx, EthHdr::LEN)? };
+            match unsafe { (*ipv6hdr).next_hdr().map_err(|_: IpError| ())? } {
+                IpProto::Tcp => return Ok(TC_ACT_OK),
+                IpProto::Udp => {
+                    let udphdr: *const UdpHdr =
+                        unsafe { ptr_at(&ctx, EthHdr::LEN + Ipv6Hdr::LEN) }?;
+                    let port = unsafe { (*udphdr).src_port() };
+                    if port != DNS_PORT {
+                        return Ok(TC_ACT_OK);
+                    }
+                    info!(&ctx, "DNS V6");
+                }
+                _ => return Ok(TC_ACT_OK),
+            };
+        }
+        _ => {}
+    }
     Ok(TC_ACT_OK)
+}
+
+#[inline(always)]
+unsafe fn ptr_at<T>(ctx: &TcContext, offset: usize) -> Result<*const T, ()> {
+    let start = ctx.data();
+    let end = ctx.data_end();
+    let len = mem::size_of::<T>();
+
+    if start + offset + len > end {
+        return Err(());
+    }
+
+    Ok((start + offset) as *const T)
 }
 
 #[cfg(not(test))]

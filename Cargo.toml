@@ -31,8 +31,8 @@ tokio = { version = "1.40.0", default-features = false, features = ["io-util"] }
 which = { version = "6.0.0", default-features = false }
 prost = { version = "0.13" }
 prost-build = { version = "0.13" }
+network-types = { version = "0.2.0" }
 
 [profile.release.package.packet-watcher-rs-ebpf]
 debug = 1
 codegen-units = 1
-

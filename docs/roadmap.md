@@ -15,7 +15,7 @@ _Goal: Master socket-layer observability and eBPF state management. Move from gl
 
 _Goal: Safely parse packet payloads directly from the network interface using TC, implementing early-exits to achieve zero-overhead monitoring._
 
-- [ ] Transition to **TC (`clsact`) ingress hooks**.
+- [x] Transition to **TC (`clsact`) ingress hooks**.
 - [ ] Implement **Fast-Path Early Exits**: Write highly optimized header parsing (Ethernet $\to$ IP $\to$ UDP/TCP) that immediately returns `TC_ACT_OK` for any non-port-53 traffic, reducing per-packet overhead to mere nanoseconds.
 - [ ] Build a verifier-safe DNS Header parser (extracting Transaction ID, Flags, Question/Answer count).
 - [ ] **The Verifier Challenge**: Implement bounded loops (e.g., `#pragma unroll` equivalents in Rust) to safely parse the variable-length, length-prefixed DNS domain name labels (e.g., `[3]www[6]google[3]com[0]`) without failing the eBPF static analyzer.

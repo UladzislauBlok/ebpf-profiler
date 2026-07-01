@@ -1,7 +1,7 @@
 mod ingestor;
 
 use anyhow::Context;
-use aya::programs::{tc, SchedClassifier, TcAttachType};
+use aya::programs::{SchedClassifier, TcAttachType, tc};
 use log::{debug, info, warn};
 use packet_watcher_rs_common::RING_BUF_NAME;
 use tokio::signal;
@@ -32,23 +32,27 @@ async fn main() -> anyhow::Result<()> {
 
     // Attach TC Program
     // Note: 'lo' (loopback) or 'eth0' can be used depending on your test environment.
-    let iface = "lo"; 
-    
+    let iface = "wlan0";
+
     // Ensure clsact qdisc is added to the interface
     let _ = tc::qdisc_add_clsact(iface);
-    
+
     let program: &mut SchedClassifier = ebpf
-        .program_mut("packet_watcher_tc")
-        .context("failed to find program 'packet_watcher_tc'")?
+        .program_mut("dns_tc")
+        .context("failed to find program 'dns_tc'")?
         .try_into()
         .context("failed to cast program to SchedClassifier")?;
-        
+
     program.load().context("failed to load tc program")?;
-    
+
     // Attach to ingress and egress
-    program.attach(iface, TcAttachType::Ingress).context("failed to attach tc ingress")?;
-    program.attach(iface, TcAttachType::Egress).context("failed to attach tc egress")?;
-    
+    program
+        .attach(iface, TcAttachType::Ingress)
+        .context("failed to attach tc ingress")?;
+    program
+        .attach(iface, TcAttachType::Egress)
+        .context("failed to attach tc egress")?;
+
     info!("Attached TC program to {}", iface);
 
     let map = ebpf

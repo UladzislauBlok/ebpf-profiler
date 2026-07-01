@@ -15,7 +15,7 @@ graph TD
     end
 
     subgraph Ingestor Daemon [Producer]
-        ringbuf[eBPF Ring Buffer: PACKET_STATS_PIPE]
+        ringbuf[eBPF Ring Buffer: DNS_EVENTS_PIPE]
         async_reader[Tokio Async Reader Task]
         mpsc[mpsc::channel 100k buffer]
         os_thread[Dedicated File Writer Thread]
@@ -24,7 +24,7 @@ graph TD
     end
 
     subgraph Storage [Disk]
-        file[Active Log File: events.log]
+        file[Active Log File: 00000001.ldpb]
     end
 
     subgraph Forwarder Daemon [Consumer]
@@ -34,7 +34,7 @@ graph TD
     end
 
     %% Flow
-    ebpf -->|C Struct: PacketStats| ringbuf
+    ebpf -->|C Struct: DnsEvent| ringbuf
     ringbuf -->|Async poll & read| async_reader
     async_reader -->|read_unaligned & try_send Struct| mpsc
     mpsc -->|blocking_recv Struct| os_thread
@@ -50,14 +50,14 @@ graph TD
 
 ## 1. Ingestor Daemon (Producer)
 
-The Ingestor's sole responsibility is to drain the eBPF ring buffer as fast as possible and commit events to disk. By minimizing CPU operations and I/O latency, it guarantees the kernel eBPF ring buffer does not overflow.
+The Ingestor's sole responsibility is to drain the eBPF ring buffer as fast as possible and commit events to disk. By minimizing CPU operations and I/O latency, it guarantees the kernel eBPF ring buffer does not overflow. See the implementation in [packet-watcher-rs/src/ingestor.rs](file:///workspace/rust/packet-watcher-rs/packet-watcher-rs/src/ingestor.rs).
 
 ### Key Operations
 
-1. **Asynchronous Ring Buffer Polling & Zero-Allocation**: A Tokio async task reads raw byte slices from the `PACKET_STATS_PIPE` using an asynchronous file descriptor (`AsyncFd`). To avoid slow heap allocations (`malloc`), it immediately and safely transforms these unaligned chunks into `PacketStats` structs on the stack using `std::ptr::read_unaligned`.
+1. **Asynchronous Ring Buffer Polling & Zero-Allocation**: A Tokio async task reads raw byte slices from the `DNS_EVENTS_PIPE` using an asynchronous file descriptor (`AsyncFd`). To avoid slow heap allocations (`malloc`), it immediately and safely transforms these unaligned chunks into `DnsEvent` structs on the stack using `std::ptr::read_unaligned`.
 2. **Buffering**: These stack-allocated structs are sent into a high-capacity multi-producer single-consumer (`mpsc`) channel. Because the channel buffer is pre-allocated on startup, sending the fixed-size struct over the channel requires zero new heap allocations, maximizing packet processing speed.
 3. **Dedicated I/O Thread**: A dedicated OS thread consumes the `mpsc` channel. This decoupling prevents slow disk I/O and Protobuf serialization from blocking the fast async eBPF reader.
-4. **Translate & Serialize**: Converts the safely read memory representation of the C struct into a Protobuf message, and serializes it to a pre-allocated, reusable byte array to minimize heap allocations.
+4. **Translate & Serialize**: Converts the safely read memory representation of the C struct into a Protobuf message (`DnsEvent` defined in [proto/network_event.proto](file:///workspace/rust/packet-watcher-rs/proto/network_event.proto)), and serializes it to a pre-allocated, reusable byte array to minimize heap allocations.
 5. **Length-Prefixed Format & Buffered Writing**: Prepends the size of the serialized message as a Big-Endian `u32` value (Length-Delimited format). It uses a large `BufWriter` (e.g., 256KB) to batch these user-space writes before committing them to disk via system calls, drastically reducing I/O overhead.
 
 ---
@@ -76,7 +76,7 @@ The log file is structured as a sequential stream of length-prefixed binary mess
 ### Technical Details
 
 - **Framing**: Each record starts with a 4-byte big-endian unsigned integer (`u32`) specifying the size of the following Protobuf message. Big-endian (network byte order) is standard for serialization binary formats.
-- **Append-Only**: The log file is opened with write-append flags (`O_WRONLY | O_APPEND | O_CREAT`). The storage layer never rewrites or updates existing data.
+- **Append-Only**: The log file is opened with write-append flags (`O_WRONLY | O_APPEND | O_CREAT`) and named `00000001.ldpb` (Length-Delimited Protocol Buffers). The storage layer never rewrites or updates existing data.
 - **Page Cache Reliance**: The Ingestor calls standard write APIs without `fsync` or `O_SYNC`. The OS caches write operations in memory (the Page Cache) and periodically flushes them to disk asynchronously. This ensures that disk latency does not block packet monitoring.
 
 ---
@@ -103,7 +103,7 @@ This architecture is optimized for initial simplicity and high performance (MVP)
 
 ### MVP Limitations
 
-- **Single Log File**: The ingestor writes to a single file (e.g., `events.log`). File rotation is omitted from the MVP.
+- **Single Log File**: The ingestor writes to a single file (e.g., `00000001.ldpb`). File rotation is omitted from the MVP.
 - **In-Memory Offset**: The forwarder keeps its read position in memory. If restarted, it will replay the log from the beginning.
 
 ### Planned Extensions
@@ -112,3 +112,4 @@ This architecture is optimized for initial simplicity and high performance (MVP)
 - **Retention Policy**: Automatically deleting old, inactive segments to avoid running out of disk space.
 - **Offset Checkpointing**: Periodically persisting the consumer's read byte offset to a state file on disk (e.g., `forwarder.offset`) to survive restarts.
 - **Parallel Serialization**: Protobuf encoding is a CPU-intensive path. To improve throughput under extreme load, the pipeline could use a thread pool to distribute the serialization workload across `N` threads. These threads would encode the packets in parallel and then send the serialized byte arrays into a single `mpsc` channel connected to the dedicated file writer thread, effectively parallelizing CPU-heavy work while keeping disk I/O strictly sequential.
+

@@ -4,68 +4,59 @@ This document describes the inner workings of the eBPF component of `packet-watc
 
 ## Kernel Specific Details
 
-### Probe Types
+### Hook Types
 
-The eBPF program relies entirely on **`fexit`** (function exit) probes. These probes attach to the exit points of kernel functions. This is crucial because it allows the program to observe not only the arguments passed to the kernel functions but also their return values, which in this case represent the number of bytes successfully transmitted or received.
+The eBPF program attaches to the network interface using **Traffic Control (TC) ingress and egress classifier hooks** (`SchedClassifier`). Using TC filters allows the program to inspect network traffic passing through the interface (e.g. `lo` or `eth0`) at the packet level, which is ideal for monitoring and filtering DNS traffic.
 
-### Observed Kernel Functions
+### Observed Hooks
 
-The program traces transport layer network events by hooking into the following kernel functions (targeted at kernel version v7.0.11):
+The TC classifier hooks into the interface and routes packets to:
 
-1. **`tcp_sendmsg`**
-   - **Signature**: `int tcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t size)`
-   - **Probe**: `tcp_sendmsg_fexit`
-   - **Behavior**: Retrieves the socket pointer (`sk`) from argument 0 and the returned bytes sent from the return value (argument 3 in `fexit` context).
-2. **`tcp_recvmsg`**
-   - **Signature**: `int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags, int *addr_len)`
-   - **Probe**: `tcp_recvmsg_fexit`
-   - **Behavior**: Retrieves the socket pointer (`sk`) from argument 0 and the returned bytes received from the return value (argument 5 in `fexit` context).
-3. **`udp_sendmsg`**
-   - **Signature**: `int udp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)`
-   - **Probe**: `udp_sendmsg_fexit`
-   - **Behavior**: Retrieves the socket pointer (`sk`) from argument 0 and the returned bytes sent from the return value (argument 3 in `fexit` context).
-4. **`udp_recvmsg`**
-   - **Signature**: `int udp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int flags, int *addr_len)`
-   - **Probe**: `udp_recvmsg_fexit`
-   - **Behavior**: Retrieves the socket pointer (`sk`) from argument 0 and the returned bytes received from the return value (argument 5 in `fexit` context).
+* **`packet_watcher_tc`** ([packet-watcher-rs-ebpf/src/main.rs](file:///workspace/rust/packet-watcher-rs/packet-watcher-rs-ebpf/src/main.rs)):
+  - **Hook Type**: `classifier`
+  - **Behavior**: Evaluates incoming (ingress) and outgoing (egress) packets. In Phase 2, it will parse variable-length DNS messages to extract queries/responses, and stream the metadata to user-space.
 
-### Socket Data Extraction
+### DNS Parsing and Early Exits (Fast-Path)
 
-From the `struct sock` pointer, the program parses deep into kernel structures (e.g., `__sk_common`) to extract:
-
-- **IP Family**: Determining if the connection is IPv4 (`AF_INET`) or IPv6 (`AF_INET6`).
-- **IP Addresses**: Source and destination IPs.
-- **Ports**: Source and destination ports (handling endianness conversion for destination ports via `u16::from_be`).
+To maintain low latency, the eBPF program implements early-exits:
+1. Parse L2 Ethernet header to verify L3 IPv4 (`ETH_P_IP`) or IPv6 (`ETH_P_IPV6`).
+2. Parse L3 IP header to verify L4 UDP or TCP.
+3. Parse L4 transport header to verify DNS traffic (source or destination port is `53`).
+4. Instantly return `TC_ACT_OK` for non-DNS packets, reducing overhead for unrelated traffic to a minimum.
 
 ## Data Modeling
 
-Both kernel and user space share a common data model (`packet-watcher-rs-common`) with a `#[repr(C)]` layout to guarantee stable memory alignment when passing data across the boundary.
+Both kernel and user space share a common data model ([packet-watcher-rs-common/src/lib.rs](file:///workspace/rust/packet-watcher-rs/packet-watcher-rs-common/src/lib.rs)) with a `#[repr(C)]` layout to guarantee stable memory alignment when passing data across the boundary.
 
-### `PacketStats`
+### `DnsEvent`
 
-This is the primary event payload, sized at exactly 56 bytes (padded for 4-byte alignment). It contains:
+This is the primary event payload, sized at exactly 328 bytes (padded for alignment). It contains:
 
-- **`connection_info`** (`ConnectionInfo`): 46-byte struct holding connection details.
-- **`bytes`** (`i32`): 4 bytes representing the bytes transferred. If the value is `< 0`, it is ignored (e.g., expected for non-blocking sockets).
-- **`function`** (`u16`): 2 bytes mapping to a `WatchedFunction` enum (`TcpSendmsg`, `TcpRecvmsg`, `UdpSendmsg`, `UdpRecvmsg`).
+* **`src_ip`** (`IpAddress`): 20 bytes representing source IP.
+* **`dst_ip`** (`IpAddress`): 20 bytes representing destination IP.
+* **`src_port`** (`u16`): 2 bytes representing source port.
+* **`dst_port`** (`u16`): 2 bytes representing destination port.
+* **`domain_name`** (`[u8; 256]`): 256 bytes storing the parsed variable-length DNS domain name labels.
+* **`domain_len`** (`u32`): 4 bytes specifying actual length of the domain name.
+* **`resolved_ip`** (`IpAddress`): 20 bytes containing the resolved IP if the packet is a DNS response.
+* **`is_response`** (`u8`): 1 byte flag (1 if response, 0 if request).
 
-### `ConnectionInfo` & `IpAddress`
+### `IpAddress`
 
-- The `ConnectionInfo` struct holds the IP family, source/destination IPs, and ports.
-- `IpAddress` is an enum (`V4`, `V6`, `Unknown`). Due to `#[repr(C)]` semantics, the enum discriminant tag takes up 4 bytes (u32), resulting in a 20-byte size for `IpAddress` overall (4 bytes tag + 16 bytes for V6 payload).
+* The `IpAddress` enum is represented as `V4([u8; 4])`, `V6([u8; 16])`, or `Unknown`. Due to `#[repr(C)]` semantics, the enum discriminant tag takes up 4 bytes (u32), resulting in a 20-byte size for `IpAddress` overall (4 bytes tag + 16 bytes payload).
 
 ## Kernel to User Space Communication
 
 Communication is achieved using an **eBPF Ring Buffer** (`bpf_ringbuf`). This is an efficient, lockless, MPSC (multi-producer, single-consumer) queue.
 
-- **Map Name**: `PACKET_STATS_PIPE`
-- **Sizing**:
-  - Size must be a power-of-2 multiple of the system page size (typically 4096 bytes, you can run `getconf PAGE_SIZE` to verify).
-  - Chosen Size: **8,388,608 bytes (8 MB)**.
-  - This capacity is estimated to handle ~10,000 events/sec over 10 seconds without dropping packets, accounting for the 64-byte cost per entry (56 bytes payload + 8 bytes kernel header).
-- **Process**:
-  1. For every captured network event, the eBPF program calls `intercept_packet`.
-  2. The data is parsed into a `PacketStats` struct.
-  3. Space is reserved in the Ring Buffer.
-  4. Data is written into the reserved entry.
-  5. The entry is submitted (`entry.submit(0)`), waking up the user space consumer to read the event.
+* **Map Name**: `DNS_EVENTS_PIPE`
+* **Sizing**:
+  - Size must be a power-of-2 multiple of the system page size (typically 4096 bytes).
+  - Chosen Size: **67,108,864 bytes (64 MB)**.
+  - Sizing Calculation: At ~10,000 events/sec, with an entry size of 336 bytes (328 bytes payload + 8 bytes kernel header), a 64 MB ring buffer can hold up to ~10 seconds of backlogged telemetry events without dropping packets.
+* **Process**:
+  1. For every captured DNS packet, the eBPF program parses the protocol headers into a `DnsEvent` struct.
+  2. Space is reserved in the `DNS_EVENTS_PIPE` ring buffer.
+  3. Data is written into the reserved entry.
+  4. The entry is submitted, waking up the user space consumer to read the event.
+
