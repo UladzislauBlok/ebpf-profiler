@@ -38,5 +38,16 @@ pub struct DnsEvent {
     pub is_response: u8,
 }
 
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub struct DnsHdr {
+    pub transaction_id: u16,
+    pub flags: u16,
+    pub questions: u16,
+    pub answer_rrs: u16,
+    pub authority_rrs: u16,
+    pub additional_rrs: u16,
+}
+
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for DnsEvent {}

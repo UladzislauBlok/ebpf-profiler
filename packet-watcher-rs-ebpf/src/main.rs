@@ -14,7 +14,7 @@ use network_types::{
     ip::{IpError, IpProto, Ipv4Hdr, Ipv6Hdr},
     udp::UdpHdr,
 };
-use packet_watcher_rs_common::DnsEvent;
+use packet_watcher_rs_common::{DnsEvent, DnsHdr, IpAddress};
 
 static DNS_PORT: u16 = 53;
 
@@ -41,42 +41,86 @@ pub fn dns_tc(ctx: TcContext) -> i32 {
 }
 
 fn try_dns_tc(ctx: TcContext) -> Result<i32, ()> {
+    let mut event = DnsEvent {
+        src_ip: IpAddress::Unknown,
+        dst_ip: IpAddress::Unknown,
+        src_port: 0,
+        dst_port: 0,
+        domain_name: [0; 256],
+        domain_len: 0,
+        resolved_ip: IpAddress::Unknown,
+        is_response: 0,
+    };
+
     let ethhdr: *const EthHdr = unsafe { ptr_at(&ctx, 0)? };
     match unsafe { *ethhdr }.ether_type() {
         Ok(EtherType::Ipv4) => {
             let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(&ctx, EthHdr::LEN)? };
+
+            event.src_ip = IpAddress::V4(unsafe { (*ipv4hdr).src_addr });
+            event.dst_ip = IpAddress::V4(unsafe { (*ipv4hdr).dst_addr });
+
             match unsafe { (*ipv4hdr).proto().map_err(|_: IpError| ())? } {
-                IpProto::Tcp => return Ok(TC_ACT_OK),
-                IpProto::Udp => {
-                    let udphdr: *const UdpHdr =
-                        unsafe { ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN) }?;
-                    let port = unsafe { (*udphdr).src_port() };
-                    if port != DNS_PORT {
-                        return Ok(TC_ACT_OK);
-                    }
-                    info!(&ctx, "DNS V4");
-                }
+                IpProto::Udp => parse_udp(&ctx, EthHdr::LEN + Ipv4Hdr::LEN, &mut event)?,
                 _ => return Ok(TC_ACT_OK),
             };
         }
         Ok(EtherType::Ipv6) => {
             let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(&ctx, EthHdr::LEN)? };
+
+            event.src_ip = IpAddress::V6(unsafe { (*ipv6hdr).src_addr });
+            event.dst_ip = IpAddress::V6(unsafe { (*ipv6hdr).dst_addr });
+
             match unsafe { (*ipv6hdr).next_hdr().map_err(|_: IpError| ())? } {
-                IpProto::Tcp => return Ok(TC_ACT_OK),
-                IpProto::Udp => {
-                    let udphdr: *const UdpHdr =
-                        unsafe { ptr_at(&ctx, EthHdr::LEN + Ipv6Hdr::LEN) }?;
-                    let port = unsafe { (*udphdr).src_port() };
-                    if port != DNS_PORT {
-                        return Ok(TC_ACT_OK);
-                    }
-                    info!(&ctx, "DNS V6");
-                }
+                IpProto::Udp => parse_udp(&ctx, EthHdr::LEN + Ipv6Hdr::LEN, &mut event)?,
                 _ => return Ok(TC_ACT_OK),
             };
         }
         _ => {}
     }
+    Ok(TC_ACT_OK)
+}
+
+#[inline(always)]
+fn parse_udp(ctx: &TcContext, offset: usize, event: &mut DnsEvent) -> Result<i32, ()> {
+    let udphdr: *const UdpHdr = unsafe { ptr_at(ctx, offset) }?;
+
+    event.src_port = unsafe { (*udphdr).src_port() };
+    event.dst_port = unsafe { (*udphdr).dst_port() };
+
+    // FILTER: We only care about DNS responses.
+    if event.src_port != DNS_PORT {
+        return Ok(TC_ACT_OK);
+    }
+
+    let dns_offset = offset + UdpHdr::LEN;
+    parse_dns(ctx, dns_offset, event)
+}
+
+#[inline(always)]
+fn parse_dns(ctx: &TcContext, offset: usize, event: &mut DnsEvent) -> Result<i32, ()> {
+    let dns_hdr: *const DnsHdr = unsafe { ptr_at(ctx, offset) }?;
+
+    let flags = u16::from_be(unsafe { (*dns_hdr).flags });
+
+    // Safety check: Ensure the QR (Query/Response) bit is actually set to 1.
+    // In the 16-bit flags field, QR is the highest bit (0x8000).
+    let is_response = (flags & 0x8000) != 0;
+    if !is_response {
+        return Ok(TC_ACT_OK);
+    }
+    event.is_response = 1;
+
+    // TODO: Parse the variable-length domain name (event.domain_name)
+    // TODO: Parse the resolved IP answer (event.resolved_ip)
+
+    if let Some(mut buf) = DNS_EVENTS_PIPE.reserve(0) {
+        unsafe {
+            core::ptr::write(buf.as_mut_ptr(), *event);
+        }
+        buf.submit(0);
+    }
+
     Ok(TC_ACT_OK)
 }
 
