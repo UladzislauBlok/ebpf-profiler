@@ -1,5 +1,7 @@
 #![no_std]
 
+use core::mem;
+
 pub const RING_BUF_NAME: &str = "DNS_EVENTS_PIPE";
 pub const AF_INET: u16 = 2;
 pub const AF_INET6: u16 = 10;
@@ -47,6 +49,11 @@ pub struct DnsHdr {
     pub answer_rrs: u16,
     pub authority_rrs: u16,
     pub additional_rrs: u16,
+}
+
+impl DnsHdr {
+    /// The size of the DNS header in bytes (12 bytes).
+    pub const LEN: usize = mem::size_of::<DnsHdr>();
 }
 
 #[cfg(feature = "user")]

@@ -110,6 +110,7 @@ fn parse_dns(ctx: &TcContext, offset: usize, event: &mut DnsEvent) -> Result<i32
     }
     event.is_response = 1;
 
+    parse_qname(ctx, offset + DnsHdr::LEN, event)?;
     // TODO: Parse the variable-length domain name (event.domain_name)
     // TODO: Parse the resolved IP answer (event.resolved_ip)
 
@@ -121,6 +122,54 @@ fn parse_dns(ctx: &TcContext, offset: usize, event: &mut DnsEvent) -> Result<i32
     }
 
     Ok(TC_ACT_OK)
+}
+
+#[inline(always)]
+fn parse_qname(ctx: &TcContext, mut offset: usize, event: &mut DnsEvent) -> Result<usize, ()> {
+    let mut out_idx: usize = 0;
+    let mut label_remaining: usize = 0;
+
+    for _ in 0..256 {
+        if label_remaining == 0 {
+            // Read 1-byte label length
+            let len_ptr: *const u8 = unsafe { ptr_at(ctx, offset)? };
+            let label_len = unsafe { *len_ptr } as usize;
+            offset += 1;
+
+            // 0x00 indicates end of QNAME
+            if label_len == 0 {
+                event.domain_len = out_idx as u32;
+                return Ok(offset);
+            }
+
+            // https://datatracker.ietf.org/doc/html/rfc1035
+            // RFC 1035: Label length cannot exceed 63 bytes
+            if label_len > 63 {
+                return Err(());
+            }
+
+            // Add dot separator between labels (e.g. "www" -> "www.")
+            if out_idx > 0 && out_idx < 256 {
+                event.domain_name[out_idx] = b'.';
+                out_idx += 1;
+            }
+
+            label_remaining = label_len;
+        } else {
+            if out_idx >= 256 {
+                return Err(());
+            }
+
+            let char_ptr: *const u8 = unsafe { ptr_at(ctx, offset)? };
+            event.domain_name[out_idx] = unsafe { *char_ptr };
+
+            out_idx += 1;
+            offset += 1;
+            label_remaining -= 1;
+        }
+    }
+
+    Err(())
 }
 
 #[inline(always)]
