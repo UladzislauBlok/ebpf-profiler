@@ -7,7 +7,6 @@ use aya_ebpf::{
     macros::{btf_map, classifier},
     programs::TcContext,
 };
-use aya_log_ebpf::info;
 use core::mem;
 use network_types::{
     eth::{EthHdr, EtherType},
