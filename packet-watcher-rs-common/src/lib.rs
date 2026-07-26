@@ -14,6 +14,16 @@ pub enum IpAddress {
     Unknown,
 }
 
+impl IpAddress {
+    /// DNS Resource Record TYPE 1 (0x0001): A Record (IPv4 Address)
+    /// Reference: RFC 1035 Section 3.2.2 (https://datatracker.ietf.org/doc/html/rfc1035#section-3.2.2)
+    pub const DNS_V4: u16 = 0x0001;
+
+    /// DNS Resource Record TYPE 28 (0x001C): AAAA Record (IPv6 Address)
+    /// Reference: RFC 3596 Section 2.1 (https://datatracker.ietf.org/doc/html/rfc3596#section-2.1)
+    pub const DNS_V6: u16 = 0x001C;
+}
+
 /// Shared DnsEvent payload sent from eBPF TC program to user-space
 ///
 /// Estimated size:
