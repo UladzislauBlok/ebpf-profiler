@@ -41,10 +41,14 @@ fn spawn_ebpf_reader(event_tx: Sender<DnsEvent>, mut async_fd: AsyncFd<RingBuf<M
                     if let Err(err) = event_tx.try_send(event) {
                         match err {
                             TrySendError::Full(_) => {
-                                debug!("Channel is full. Dropping packet to preserve eBPF reader speed.");
+                                debug!(
+                                    "Channel is full. Dropping packet to preserve eBPF reader speed."
+                                );
                             }
                             TrySendError::Closed(_) => {
-                                error!("Event channel closed unexpectedly. Shutting down reader task.");
+                                error!(
+                                    "Event channel closed unexpectedly. Shutting down reader task."
+                                );
                                 return;
                             }
                         }
@@ -58,8 +62,8 @@ fn spawn_ebpf_reader(event_tx: Sender<DnsEvent>, mut async_fd: AsyncFd<RingBuf<M
 
 fn format_ip(ip: &IpAddress) -> String {
     match ip {
-        IpAddress::V4(octets) => Ipv4Addr::from(*octets).to_string(),
-        IpAddress::V6(octets) => Ipv6Addr::from(*octets).to_string(),
+        IpAddress::V4(octets) => Ipv4Addr::from(octets).to_string(),
+        IpAddress::V6(octets) => Ipv6Addr::from(octets).to_string(),
         IpAddress::Unknown => "unknown".to_string(),
     }
 }
@@ -78,7 +82,8 @@ fn spawn_file_writer(mut event_rx: Receiver<DnsEvent>) {
         while let Some(event) = event_rx.blocking_recv() {
             // Convert C string/buffer to Rust string
             let domain_len = std::cmp::min(event.domain_len as usize, 256);
-            let domain_name = String::from_utf8_lossy(&event.domain_name[..domain_len]).into_owned();
+            let domain_name =
+                String::from_utf8_lossy(&event.domain_name[..domain_len]).into_owned();
 
             let resolved_ip = if event.is_response == 1 {
                 Some(format_ip(&event.resolved_ip))

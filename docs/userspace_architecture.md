@@ -9,6 +9,43 @@ The user-space system is split into two logical pipelines decoupled by an append
 ## Architectural Diagram
 
 ```mermaid
+    sequenceDiagram
+        autonumber
+        participant Pod as Application Pod Container
+        participant Kernel as Linux Kernel (eBPF Redirect & TC Egress)
+        participant Proxy as Cilium User-Space DNS Proxy
+        participant Upstream as CoreDNS / Upstream DNS
+        participant Map as BPF Map (ALLOWED_IPS_MAP)
+
+        Note over Pod,Upstream: STAGE 1: DNS QUERY REDIRECTION
+        Pod->>Kernel: 1. Send DNS Query (UDP port 53 for api.github.com)
+        Kernel->>Proxy: 2. eBPF Redirects Query to Local DNS Proxy Socket
+        Proxy->>Upstream: 3. Proxy Forwards Query to CoreDNS
+
+        Note over Pod,Upstream: STAGE 2: DNS ANSWER HOLDING & SYNCHRONOUS MAP UPDATE
+        Upstream-->>Proxy: 4. CoreDNS Returns DNS Answer (IP: 140.82.121.4)
+
+        rect rgb(255, 240, 220)
+            Note over Proxy: ⚠️ PROXY HOLDS DNS ANSWER IN MEMORY!<br/>DOES NOT SEND TO POD YET!
+         end
+
+         Proxy->>Proxy: 5. Parse DNS Answer (Domain: api.github.com -> 140.82.121.4)
+         Proxy->>Map: 6. bpf(BPF_MAP_UPDATE_ELEM) Syscall (Insert 140.82.121.4)
+         Map-->>Proxy: 7. Kernel Confirms Map Update Success!
+
+         Note over Pod,Upstream: STAGE 3: DNS ANSWER RELEASE & RACE-FREE EGRESS FIREWALL
+         rect rgb(220, 255, 220)
+             Proxy-->>Pod: 8. Proxy Delivers DNS Answer to Pod Socket
+         end
+
+         Pod->>Kernel: 9. Pod Sends HTTP Request to 140.82.121.4
+         Kernel->>Map: 10. TC Egress Lookup for 140.82.121.4
+         Map-->>Kernel: 11. Match Found! (Allowed)
+         Kernel-->>Pod: 12. Return TC_ACT_OK -> Packet Sent Out!
+
+```
+
+```mermaid
 graph TD
     subgraph Kernel Space
         ebpf[eBPF Program]
@@ -112,4 +149,3 @@ This architecture is optimized for initial simplicity and high performance (MVP)
 - **Retention Policy**: Automatically deleting old, inactive segments to avoid running out of disk space.
 - **Offset Checkpointing**: Periodically persisting the consumer's read byte offset to a state file on disk (e.g., `forwarder.offset`) to survive restarts.
 - **Parallel Serialization**: Protobuf encoding is a CPU-intensive path. To improve throughput under extreme load, the pipeline could use a thread pool to distribute the serialization workload across `N` threads. These threads would encode the packets in parallel and then send the serialized byte arrays into a single `mpsc` channel connected to the dedicated file writer thread, effectively parallelizing CPU-heavy work while keeping disk I/O strictly sequential.
-
