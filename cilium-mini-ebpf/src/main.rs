@@ -7,13 +7,14 @@ use aya_ebpf::{
     macros::{btf_map, classifier},
     programs::TcContext,
 };
+use aya_log_ebpf::debug;
 use core::mem;
 use network_types::{
     eth::{EthHdr, EtherType},
     ip::{IpError, IpProto, Ipv4Hdr, Ipv6Hdr},
     udp::UdpHdr,
 };
-use packet_watcher_rs_common::{AF_INET, AF_INET6, MAX_DNS_PAYLOAD_SIZE, RawDnsEvent, RawIpAddr};
+use cilium_mini_common::{MAX_DNS_PAYLOAD_SIZE, RawDnsEvent, RawIpAddr};
 
 static DNS_PORT: u16 = 53;
 
@@ -45,40 +46,28 @@ pub fn dns_tc(ctx: TcContext) -> i32 {
 
 fn try_dns_tc(ctx: TcContext) -> Result<i32, ()> {
     let ethhdr: *const EthHdr = unsafe { ptr_at(&ctx, 0)? };
-    let mut src_ip: [u8; 16] = [0; 16];
-    let mut dst_ip: [u8; 16] = [0; 16];
     match unsafe { *ethhdr }.ether_type() {
         Ok(EtherType::Ipv4) => {
             let ipv4hdr: *const Ipv4Hdr = unsafe { ptr_at(&ctx, EthHdr::LEN)? };
 
-            src_ip[..4].copy_from_slice(&unsafe { (*ipv4hdr).src_addr });
-            dst_ip[..4].copy_from_slice(&unsafe { (*ipv4hdr).dst_addr });
+            let src_ip = RawIpAddr::from_ipv4(unsafe { (*ipv4hdr).src_addr });
+            let dst_ip = RawIpAddr::from_ipv4(unsafe { (*ipv4hdr).dst_addr });
 
-            let ip_hdr_len = get_ipv4_header_len(ipv4hdr);
+            let ip_hdr_len = get_ipv4_header_len(ipv4hdr, &ctx)?;
 
             match unsafe { (*ipv4hdr).proto().map_err(|_: IpError| ())? } {
-                IpProto::Udp => parse_udp(
-                    &ctx,
-                    EthHdr::LEN + ip_hdr_len,
-                    RawIpAddr::new(src_ip, AF_INET),
-                    RawIpAddr::new(dst_ip, AF_INET),
-                )?,
+                IpProto::Udp => parse_udp(&ctx, EthHdr::LEN + ip_hdr_len, src_ip, dst_ip)?,
                 _ => return Ok(TC_ACT_OK),
             };
         }
         Ok(EtherType::Ipv6) => {
             let ipv6hdr: *const Ipv6Hdr = unsafe { ptr_at(&ctx, EthHdr::LEN)? };
 
-            src_ip.copy_from_slice(&unsafe { (*ipv6hdr).src_addr });
-            dst_ip.copy_from_slice(&unsafe { (*ipv6hdr).dst_addr });
+            let src_ip = RawIpAddr::from_ipv6(unsafe { (*ipv6hdr).src_addr });
+            let dst_ip = RawIpAddr::from_ipv6(unsafe { (*ipv6hdr).dst_addr });
 
             match unsafe { (*ipv6hdr).next_hdr().map_err(|_: IpError| ())? } {
-                IpProto::Udp => parse_udp(
-                    &ctx,
-                    EthHdr::LEN + Ipv6Hdr::LEN,
-                    RawIpAddr::new(src_ip, AF_INET6),
-                    RawIpAddr::new(dst_ip, AF_INET6),
-                )?,
+                IpProto::Udp => parse_udp(&ctx, EthHdr::LEN + Ipv6Hdr::LEN, src_ip, dst_ip)?,
                 _ => return Ok(TC_ACT_OK),
             };
         }
@@ -99,14 +88,17 @@ fn parse_udp(
     let src_port = unsafe { (*udphdr).src_port() };
     let dst_port = unsafe { (*udphdr).dst_port() };
 
+    debug!(
+        &ctx,
+        "UDP in. src_port: {}; dst_port: {}", src_port, dst_port
+    );
+
     // FILTER: We only care about DNS responses.
     if src_port != DNS_PORT {
         return Ok(TC_ACT_OK);
     }
 
     let payload_offset = offset + UdpHdr::LEN;
-
-    let payload_src_ptr: *const u8 = unsafe { ptr_at::<u8>(ctx, payload_offset) }?;
 
     let data_start = ctx.data();
     let data_end = ctx.data_end();
@@ -116,23 +108,38 @@ fn parse_udp(
         return Ok(TC_ACT_OK);
     }
 
-    let payload_len = available_len.min(MAX_DNS_PAYLOAD_SIZE);
+    debug!(&ctx, "DNS in");
 
     if let Some(mut ring_buf) = DNS_EVENTS_PIPE.reserve(0) {
         let event_ptr: *mut RawDnsEvent = ring_buf.as_mut_ptr() as *mut RawDnsEvent;
 
         unsafe {
-            (*event_ptr).src_ip = src_ip;
-            (*event_ptr).dst_ip = dst_ip;
+            src_ip.write_to(core::ptr::addr_of_mut!((*event_ptr).src_ip));
+            dst_ip.write_to(core::ptr::addr_of_mut!((*event_ptr).dst_ip));
             (*event_ptr).src_port = src_port;
             (*event_ptr).dst_port = dst_port;
-            (*event_ptr).payload_len = payload_len as u16;
-            core::ptr::copy_nonoverlapping(
-                payload_src_ptr,
-                (*event_ptr).payload.as_mut_ptr(),
-                payload_len,
-            );
         }
+
+        let dst_payload = unsafe { &mut (*event_ptr).payload };
+        let mut copied_len: u16 = 0;
+
+        for i in 0..MAX_DNS_PAYLOAD_SIZE {
+            let cur_offset = payload_offset + i;
+
+            if data_start + cur_offset + 1 > data_end {
+                break;
+            }
+
+            let byte_ptr: *const u8 = (data_start + cur_offset) as *const u8;
+            dst_payload[i] = unsafe { *byte_ptr };
+            copied_len += 1;
+        }
+
+        unsafe {
+            (*event_ptr).payload_len = copied_len;
+        }
+
+        debug!(&ctx, "DNS out");
 
         ring_buf.submit(0);
     }
@@ -154,9 +161,15 @@ unsafe fn ptr_at<T>(ctx: &TcContext, offset: usize) -> Result<*const T, ()> {
 }
 
 #[inline(always)]
-fn get_ipv4_header_len(ipv4hdr: *const Ipv4Hdr) -> usize {
-    let ihl = unsafe { (*ipv4hdr).ihl() } as usize;
-    ihl * BYTES_PER_IHL_WORD
+fn get_ipv4_header_len(ipv4hdr: *const Ipv4Hdr, ctx: &TcContext) -> Result<usize, ()> {
+    let raw_ihl = unsafe { (*ipv4hdr).ihl() } as usize;
+    let ihl = raw_ihl & 0x0F;
+    debug!(&ctx, "IHL res: {}", ihl);
+    // RFC 791: Minimum is 5 (20 bytes), maximum is 15 (60 bytes)
+    if ihl < 5 || ihl > 15 {
+        return Err(());
+    }
+    Ok(ihl * BYTES_PER_IHL_WORD)
 }
 
 #[cfg(not(test))]

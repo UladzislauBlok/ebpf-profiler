@@ -1,5 +1,4 @@
-mod ingestor;
-mod parser;
+mod topology;
 
 use anyhow::Context;
 use aya::{
@@ -8,14 +7,14 @@ use aya::{
 };
 use clap::Parser;
 use log::{info, warn};
-use packet_watcher_rs_common::RING_BUF_NAME;
+use cilium_mini_common::RING_BUF_NAME;
 use tokio::signal;
 
 #[derive(Parser, Debug)]
 #[command(
     author,
     version,
-    about = "eBPF Network Packet Watcher & DNS Telemetry Logger"
+    about = "Cilium Mini: eBPF Kubernetes Dataplane & Network Observability Daemon"
 )]
 struct Cli {
     /// Network interface to attach TC program (e.g. wlan0, eth0, lo)
@@ -43,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
         .take_map(RING_BUF_NAME)
         .context(format!("failed to find {} map", RING_BUF_NAME))?;
 
-    if let Err(e) = ingestor::start(map).await {
+    if let Err(e) = topology::assembly_processing_topology(map).await {
         warn!("Ingestor error: {e:#}");
     }
 
@@ -57,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
 fn load_ebpf() -> anyhow::Result<Ebpf> {
     aya::Ebpf::load(aya::include_bytes_aligned!(concat!(
         env!("OUT_DIR"),
-        "/packet-watcher-rs"
+        "/cilium-mini-rs"
     )))
     .context("failed to load eBPF object")
 }

@@ -1,11 +1,11 @@
 [package]
-name = "packet-watcher-rs-ebpf"
+name = "cilium-mini-ebpf"
 version = "0.1.0"
 edition.workspace = true
 license = "MIT OR GPL-2.0-only"
 
 [dependencies]
-packet-watcher-rs-common = { path = "../packet-watcher-rs-common" }
+cilium-mini-common = { path = "../cilium-mini-common" }
 
 aya-ebpf = { workspace = true }
 aya-log-ebpf = { workspace = true }
@@ -15,5 +15,5 @@ network-types = { workspace = true }
 which = { workspace = true }
 
 [[bin]]
-name = "packet-watcher-rs"
+name = "cilium-mini-rs"
 path = "src/main.rs"

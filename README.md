@@ -1,4 +1,6 @@
-# packet-watcher-rs
+# cilium-mini-rs
+
+eBPF-powered Kubernetes Dataplane V2 & Network Observability Daemon in Rust.
 
 ## Prerequisites
 
@@ -10,7 +12,7 @@
 Use `cargo build`, `cargo check`, etc. as normal. Run your program with:
 
 ```shell
-RUST_LOG=debug cargo run --release
+RUST_LOG=debug cargo run -p cilium-mini-rs -- --iface lo
 ```
 
 Cargo build scripts are used to automatically build the eBPF correctly and include it in the program.

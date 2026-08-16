@@ -1,6 +1,6 @@
-# Packet Watcher eBPF Architecture
+# Cilium Mini eBPF Architecture
 
-This document describes the inner workings of the eBPF component of `packet-watcher-rs` and how it interacts with the Linux kernel and user space.
+This document describes the inner workings of the eBPF component of `cilium-mini-rs` and how it interacts with the Linux kernel and user space.
 
 ## Kernel Specific Details
 
@@ -12,7 +12,7 @@ The eBPF program attaches to the network interface using **Traffic Control (TC) 
 
 The TC classifier hooks into the interface and routes packets to:
 
-* **`packet_watcher_tc`** ([packet-watcher-rs-ebpf/src/main.rs](file:///workspace/rust/packet-watcher-rs/packet-watcher-rs-ebpf/src/main.rs)):
+* **`dns_tc`** ([cilium-mini-ebpf/src/main.rs](file:///workspace/rust/cilium-mini-rs/cilium-mini-ebpf/src/main.rs)):
   - **Hook Type**: `classifier`
   - **Behavior**: Evaluates incoming (ingress) and outgoing (egress) packets. In Phase 2, it will parse variable-length DNS messages to extract queries/responses, and stream the metadata to user-space.
 
@@ -26,7 +26,7 @@ To maintain low latency, the eBPF program implements early-exits:
 
 ## Data Modeling
 
-Both kernel and user space share a common data model ([packet-watcher-rs-common/src/lib.rs](file:///workspace/rust/packet-watcher-rs/packet-watcher-rs-common/src/lib.rs)) with a `#[repr(C)]` layout to guarantee stable memory alignment when passing data across the boundary.
+Both kernel and user space share a common data model ([cilium-mini-common/src/lib.rs](file:///workspace/rust/cilium-mini-rs/cilium-mini-common/src/lib.rs)) with a `#[repr(C)]` layout to guarantee stable memory alignment when passing data across the boundary.
 
 ### `DnsEvent`
 

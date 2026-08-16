@@ -1,6 +1,6 @@
 # User-Space Architecture: Write-Ahead Commit Log MVP
 
-This document describes the design and architecture of the user-space component of `packet-watcher-rs`.
+This document describes the design and architecture of the user-space component of `cilium-mini-rs`.
 
 The user-space system is split into two logical pipelines decoupled by an append-only commit log file on disk. This design is inspired by write-ahead logging (WAL) and message brokers like Apache Kafka.
 
@@ -87,14 +87,14 @@ graph TD
 
 ## 1. Ingestor Daemon (Producer)
 
-The Ingestor's sole responsibility is to drain the eBPF ring buffer as fast as possible and commit events to disk. By minimizing CPU operations and I/O latency, it guarantees the kernel eBPF ring buffer does not overflow. See the implementation in [packet-watcher-rs/src/ingestor.rs](file:///workspace/rust/packet-watcher-rs/packet-watcher-rs/src/ingestor.rs).
+The Ingestor's sole responsibility is to drain the eBPF ring buffer as fast as possible and commit events to disk. By minimizing CPU operations and I/O latency, it guarantees the kernel eBPF ring buffer does not overflow. See the implementation in [cilium-mini-rs/src/topology.rs](file:///workspace/rust/cilium-mini-rs/cilium-mini-rs/src/topology.rs).
 
 ### Key Operations
 
 1. **Asynchronous Ring Buffer Polling & Zero-Allocation**: A Tokio async task reads raw byte slices from the `DNS_EVENTS_PIPE` using an asynchronous file descriptor (`AsyncFd`). To avoid slow heap allocations (`malloc`), it immediately and safely transforms these unaligned chunks into `DnsEvent` structs on the stack using `std::ptr::read_unaligned`.
 2. **Buffering**: These stack-allocated structs are sent into a high-capacity multi-producer single-consumer (`mpsc`) channel. Because the channel buffer is pre-allocated on startup, sending the fixed-size struct over the channel requires zero new heap allocations, maximizing packet processing speed.
 3. **Dedicated I/O Thread**: A dedicated OS thread consumes the `mpsc` channel. This decoupling prevents slow disk I/O and Protobuf serialization from blocking the fast async eBPF reader.
-4. **Translate & Serialize**: Converts the safely read memory representation of the C struct into a Protobuf message (`DnsEvent` defined in [proto/network_event.proto](file:///workspace/rust/packet-watcher-rs/proto/network_event.proto)), and serializes it to a pre-allocated, reusable byte array to minimize heap allocations.
+4. **Translate & Serialize**: Converts the safely read memory representation of the C struct into a Protobuf message (`DnsEvent` defined in [proto/network_event.proto](file:///workspace/rust/cilium-mini-rs/proto/network_event.proto)), and serializes it to a pre-allocated, reusable byte array to minimize heap allocations.
 5. **Length-Prefixed Format & Buffered Writing**: Prepends the size of the serialized message as a Big-Endian `u32` value (Length-Delimited format). It uses a large `BufWriter` (e.g., 256KB) to batch these user-space writes before committing them to disk via system calls, drastically reducing I/O overhead.
 
 ---

@@ -1,26 +1,49 @@
 #![no_std]
 
 pub const RING_BUF_NAME: &str = "DNS_EVENTS_PIPE";
-pub const AF_INET: u8 = 2;
-pub const AF_INET6: u8 = 10;
+pub const AF_INET: u32 = 2;
+pub const AF_INET6: u32 = 10;
 pub const MAX_DNS_PAYLOAD_SIZE: usize = 512;
 
 ///
 /// _pad to be 24 bytes (64-bit system pointer)
 #[derive(Clone, Copy)]
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct RawIpAddr {
     pub bytes: [u8; 16],
-    pub family: u8,
-    _pad: [u8; 7],
+    pub family: u32,
+    _pad: u32,
 }
 
 impl RawIpAddr {
-    pub fn new(bytes: [u8; 16], family: u8) -> Self {
-        RawIpAddr {
-            bytes,
-            family,
-            _pad: [0; 7],
+    pub const fn from_ipv4(addr: [u8; 4]) -> Self {
+        Self {
+            bytes: [
+                addr[0], addr[1], addr[2], addr[3], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            family: AF_INET,
+            _pad: 0,
+        }
+    }
+
+    pub const fn from_ipv6(addr: [u8; 16]) -> Self {
+        Self {
+            bytes: addr,
+            family: AF_INET6,
+            _pad: 0,
+        }
+    }
+
+    /// Writes the 24-byte struct as 3x 64-bit (u64) words.
+    /// Guarantees zero memset/memcpy in eBPF bytecode.
+    #[inline(always)]
+    pub unsafe fn write_to(&self, dst: *mut RawIpAddr) {
+        unsafe {
+            let d = dst as *mut u64;
+            let s = (self as *const Self) as *const u64;
+            *d.add(0) = *s.add(0);
+            *d.add(1) = *s.add(1);
+            *d.add(2) = *s.add(2);
         }
     }
 }
@@ -37,7 +60,7 @@ impl RawIpAddr {
 ///   - padding = 2 bytes (sum of fields is 566 bytes)
 /// Total size = 568 bytes
 #[derive(Clone, Copy)]
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct RawDnsEvent {
     pub src_ip: RawIpAddr,
     pub dst_ip: RawIpAddr,

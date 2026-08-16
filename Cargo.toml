@@ -1,11 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
-    "packet-watcher-rs",
-    "packet-watcher-rs-common",
-    "packet-watcher-rs-ebpf",
+    "cilium-mini-rs",
+    "cilium-mini-common",
+    "cilium-mini-ebpf",
 ]
-default-members = ["packet-watcher-rs", "packet-watcher-rs-common"]
+default-members = ["cilium-mini-rs", "cilium-mini-common"]
 
 [workspace.package]
 license = "MIT OR GPL-2.0-only"
@@ -33,6 +33,11 @@ prost = { version = "0.13" }
 prost-build = { version = "0.13" }
 network-types = { version = "0.2.0" }
 
-[profile.release.package.packet-watcher-rs-ebpf]
+[profile.dev.package.cilium-mini-ebpf]
+opt-level = 3
 debug = 1
+codegen-units = 1
+
+[profile.release.package.cilium-mini-ebpf]
+opt-level = 3
 codegen-units = 1
