@@ -9,13 +9,11 @@ eBPF-powered Kubernetes Dataplane V2 & Network Observability Daemon in Rust.
 
 ## Build & Run
 
-Use `cargo build`, `cargo check`, etc. as normal. Run your program with:
-
 ```shell
-RUST_LOG=debug cargo run -p cilium-mini-rs -- --iface lo
-```
+cargo build
 
-Cargo build scripts are used to automatically build the eBPF correctly and include it in the program.
+sudo cilium-mini-rs -i lo
+```
 
 ## License
 
