@@ -55,10 +55,10 @@ impl RawIpAddr {
 ///   - dst_ip (RawIpAddr) = 24 bytes
 ///   - src_port (u16) = 2 bytes
 ///   - dst_port (u16) = 2 bytes
-///   - payload ([u8; 512]) = 512 bytes
 ///   - payload_len (u16) = 2 bytes
+///   - padding = 2 bytes (sum of 3 fields before is 6 bytes)
+///   - payload ([u8; 512]) = 512 bytes
 ///   - timestamp_ns (u64) = 8 bytes
-///   - padding = 2 bytes (sum of fields is 574 bytes)
 /// Total size = 576 bytes
 #[derive(Clone, Copy)]
 #[repr(C, align(8))]
@@ -67,10 +67,10 @@ pub struct RawDnsEvent {
     pub dst_ip: RawIpAddr,
     pub src_port: u16,
     pub dst_port: u16,
-    pub payload: [u8; MAX_DNS_PAYLOAD_SIZE],
+    _pad: u16,
     pub payload_len: u16,
     pub timestamp_ns: u64,
-    _pad: u16,
+    pub payload: [u8; MAX_DNS_PAYLOAD_SIZE],
 }
 
 #[cfg(feature = "user")]
