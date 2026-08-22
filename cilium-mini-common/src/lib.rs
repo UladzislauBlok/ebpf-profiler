@@ -7,7 +7,7 @@ pub const MAX_DNS_PAYLOAD_SIZE: usize = 512;
 
 ///
 /// _pad to be 24 bytes (64-bit system pointer)
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 #[repr(C, align(8))]
 pub struct RawIpAddr {
     pub bytes: [u8; 16],
@@ -71,6 +71,21 @@ pub struct RawDnsEvent {
     pub payload_len: u16,
     pub timestamp_ns: u64,
     pub payload: [u8; MAX_DNS_PAYLOAD_SIZE],
+}
+
+impl Default for RawDnsEvent {
+    fn default() -> Self {
+        Self {
+            src_ip: RawIpAddr::default(),
+            dst_ip: RawIpAddr::default(),
+            src_port: 0,
+            dst_port: 0,
+            _pad: 0,
+            payload_len: 0,
+            timestamp_ns: 0,
+            payload: [0; MAX_DNS_PAYLOAD_SIZE],
+        }
+    }
 }
 
 #[cfg(feature = "user")]

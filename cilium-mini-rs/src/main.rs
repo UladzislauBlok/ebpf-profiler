@@ -5,9 +5,9 @@ use aya::{
     Ebpf,
     programs::{SchedClassifier, TcAttachType, tc},
 };
+use cilium_mini_common::RING_BUF_NAME;
 use clap::Parser;
 use log::{info, warn};
-use cilium_mini_common::RING_BUF_NAME;
 use tokio::signal;
 
 #[derive(Parser, Debug)]
@@ -42,7 +42,7 @@ async fn main() -> anyhow::Result<()> {
         .take_map(RING_BUF_NAME)
         .context(format!("failed to find {} map", RING_BUF_NAME))?;
 
-    if let Err(e) = topology::assembly_processing_topology(map).await {
+    if let Err(e) = topology::assembly_processing_topology(map) {
         warn!("Ingestor error: {e:#}");
     }
 

@@ -2,12 +2,13 @@ syntax = "proto3";
 
 package proto;
 
-message DnsEvent {
+message DnsResponse {
   string src_ip = 1;
   string dst_ip = 2;
   uint32 src_port = 3;
   uint32 dst_port = 4;
   string domain_name = 5;
-  optional string resolved_ip = 6;
-  bool is_response = 7;
+  string resolved_ip = 6;
+  bytes resolved_ip_raw = 7;
+  uint32 ip_family = 8;
 }

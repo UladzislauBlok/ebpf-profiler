@@ -1,3 +1,58 @@
+use std::{error::Error, fmt};
+
+use cilium_mini_common::RawDnsEvent;
+
+use crate::topology::proto::DnsResponse;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DnsParseError {
+    PayloadTooShort { needed: usize, available: usize },
+    InvalidLabelLength(u8),
+    LabelExceedsMaxLen,
+    CompressionLoopDetected,
+    NonAsciiDomainName,
+    UnsupportedRecordType(u16),
+}
+
+impl fmt::Display for DnsParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PayloadTooShort { needed, available } => {
+                write!(
+                    f,
+                    "Payload too short: needed {needed} bytes, available {available}"
+                )
+            }
+            Self::InvalidLabelLength(len) => write!(f, "Invalid label length: {len} (> 63)"),
+            Self::LabelExceedsMaxLen => write!(f, "Label exceeds maximum domain length"),
+            Self::CompressionLoopDetected => write!(f, "DNS compression pointer loop detected"),
+            Self::NonAsciiDomainName => write!(f, "Non-ASCII character in domain name"),
+            Self::UnsupportedRecordType(t) => write!(f, "Unsupported DNS record type: {t}"),
+        }
+    }
+}
+
+impl Error for DnsParseError {}
+
+pub fn parse_dns_into(
+    raw_event: &RawDnsEvent,
+    slot: &mut DnsResponse,
+) -> Result<(), DnsParseError> {
+    Ok(())
+}
+
+pub fn reset_dns_response(dns_response: &mut DnsResponse) {
+    dns_response.src_ip.clear();
+    dns_response.dst_ip.clear();
+    dns_response.domain_name.clear();
+    dns_response.resolved_ip.clear();
+    dns_response.resolved_ip_raw.clear();
+
+    dns_response.src_port = 0;
+    dns_response.dst_port = 0;
+    dns_response.ip_family = 0;
+}
+
 // #[derive(Clone, Copy)]
 // pub struct DnsHdr {
 //     pub transaction_id: u16,

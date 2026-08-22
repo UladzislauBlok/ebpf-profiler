@@ -32,6 +32,7 @@ which = { version = "6.0.0", default-features = false }
 prost = { version = "0.13" }
 prost-build = { version = "0.13" }
 network-types = { version = "0.2.0" }
+thingbuf = { version = "0.1.6" }
 
 [profile.dev.package.cilium-mini-ebpf]
 opt-level = 3
