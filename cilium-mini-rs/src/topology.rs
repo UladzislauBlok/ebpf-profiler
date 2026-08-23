@@ -4,6 +4,7 @@ mod proto {
     include!(concat!(env!("OUT_DIR"), "/proto.rs"));
 }
 
+use crate::topology::proto::DnsResponse;
 use anyhow::Context;
 use aya::maps::{Map, MapData, RingBuf};
 use cilium_mini_common::RawDnsEvent;
@@ -13,9 +14,6 @@ use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
 use thingbuf::mpsc;
 use tokio::io::unix::AsyncFd;
-
-use crate::topology::parser::parse_dns_into;
-use crate::topology::proto::DnsResponse;
 
 pub fn assembly_processing_topology(map: Map) -> Result<(), anyhow::Error> {
     let ring_buf = RingBuf::try_from(map).context("failed to convert map to RingBuf")?;
@@ -75,9 +73,7 @@ fn spawn_dns_parser(
         let mut local_dns_response = DnsResponse::default();
 
         while let Some(raw_dns_event) = raw_dns_rx.recv_ref().await {
-            parser::reset_dns_response(&mut local_dns_response);
-
-            match parse_dns_into(&raw_dns_event, &mut local_dns_response) {
+            match parser::parse_dns_into(&raw_dns_event, &mut local_dns_response) {
                 Ok(()) => match dns_tx.try_send_ref() {
                     Ok(mut slot) => {
                         std::mem::swap(&mut *slot, &mut local_dns_response);

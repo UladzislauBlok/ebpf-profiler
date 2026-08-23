@@ -1,17 +1,23 @@
-use std::{error::Error, fmt};
-
-use cilium_mini_common::RawDnsEvent;
+use std::{
+    error::Error,
+    fmt::{self, Write},
+    mem,
+    net::{Ipv4Addr, Ipv6Addr},
+    str,
+};
 
 use crate::topology::proto::DnsResponse;
+use cilium_mini_common::{AF_INET, AF_INET6, RawDnsEvent, RawIpAddr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DnsParseError {
     PayloadTooShort { needed: usize, available: usize },
-    InvalidLabelLength(u8),
+    InvalidLabelLength(usize),
     LabelExceedsMaxLen,
-    CompressionLoopDetected,
     NonAsciiDomainName,
     UnsupportedRecordType(u16),
+    UnsupportedAddressFamily(u32),
+    FormatError,
 }
 
 impl fmt::Display for DnsParseError {
@@ -24,178 +30,287 @@ impl fmt::Display for DnsParseError {
                 )
             }
             Self::InvalidLabelLength(len) => write!(f, "Invalid label length: {len} (> 63)"),
-            Self::LabelExceedsMaxLen => write!(f, "Label exceeds maximum domain length"),
-            Self::CompressionLoopDetected => write!(f, "DNS compression pointer loop detected"),
+            Self::LabelExceedsMaxLen => write!(f, "Label exceeds maximum domain length (255)"),
             Self::NonAsciiDomainName => write!(f, "Non-ASCII character in domain name"),
             Self::UnsupportedRecordType(t) => write!(f, "Unsupported DNS record type: {t}"),
+            Self::UnsupportedAddressFamily(af) => write!(f, "Unsupported address family: {af}"),
+            Self::FormatError => write!(f, "Failed to format IP address string"),
         }
     }
 }
 
 impl Error for DnsParseError {}
 
+/// Parses raw DNS event payload into a protobuf `DnsResponse` slot.
+/// Automatically clears existing slot contents to reuse buffers without reallocation.
 pub fn parse_dns_into(
     raw_event: &RawDnsEvent,
     slot: &mut DnsResponse,
 ) -> Result<(), DnsParseError> {
+    reset_slot(slot);
+    parse_ip(&raw_event.src_ip, &mut slot.src_ip)?;
+    parse_ip(&raw_event.dst_ip, &mut slot.dst_ip)?;
+
+    slot.src_port = raw_event.src_port.into();
+    slot.dst_port = raw_event.dst_port.into();
+
+    let total_len = raw_event.payload_len as usize;
+    if total_len < DnsHdr::LEN {
+        return Err(DnsParseError::PayloadTooShort {
+            needed: DnsHdr::LEN,
+            available: total_len,
+        });
+    }
+
+    let dns_payload = &raw_event.payload[..total_len];
+
+    let qname_payload = &dns_payload[DnsHdr::LEN..];
+    let qname_len = parse_qname(qname_payload, &mut slot.domain_name)?;
+
+    // QNAME (qname_len) + QTYPE (2B) + QCLASS (2B)
+    let rdata_offset = DnsHdr::LEN + qname_len + 4;
+    if rdata_offset > total_len {
+        return Err(DnsParseError::PayloadTooShort {
+            needed: rdata_offset,
+            available: total_len,
+        });
+    }
+
+    let rdata_payload = &dns_payload[rdata_offset..];
+    parse_rdata(rdata_payload, slot)?;
     Ok(())
 }
 
-pub fn reset_dns_response(dns_response: &mut DnsResponse) {
-    dns_response.src_ip.clear();
-    dns_response.dst_ip.clear();
-    dns_response.domain_name.clear();
-    dns_response.resolved_ip.clear();
-    dns_response.resolved_ip_raw.clear();
-
-    dns_response.src_port = 0;
-    dns_response.dst_port = 0;
-    dns_response.ip_family = 0;
+struct DnsHdr {
+    transaction_id: u16,
+    flags: u16,
+    questions: u16,
+    answer_rrs: u16,
+    authority_rrs: u16,
+    additional_rrs: u16,
 }
 
-// #[derive(Clone, Copy)]
-// pub struct DnsHdr {
-//     pub transaction_id: u16,
-//     pub flags: u16,
-//     pub questions: u16,
-//     pub answer_rrs: u16,
-//     pub authority_rrs: u16,
-//     pub additional_rrs: u16,
-// }
+impl DnsHdr {
+    const LEN: usize = mem::size_of::<Self>();
+}
 
-// impl DnsHdr {
-//     /// The size of the DNS header in bytes (12 bytes).
-//     pub const LEN: usize = mem::size_of::<DnsHdr>();
-// }
-// impl RawIpAddr {
-//     /// DNS Resource Record TYPE 1 (0x0001): A Record (IPv4 Address)
-//     /// Reference: RFC 1035 Section 3.2.2 (https://datatracker.ietf.org/doc/html/rfc1035#section-3.2.2)
-//     pub const DNS_V4: u16 = 0x0001;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+enum RecordType {
+    A = 1,
+    AAAA = 28,
+}
 
-//     /// DNS Resource Record TYPE 28 (0x001C): AAAA Record (IPv6 Address)
-//     /// Reference: RFC 3596 Section 2.1 (https://datatracker.ietf.org/doc/html/rfc3596#section-2.1)
-//     pub const DNS_V6: u16 = 0x001C;
-// }
-// fn f() {
-//     // QNAME  - n bytes
-//     // QTYPE  - 2 bytes
-//     // QCLASS - 2 bytes
-//     offset = parse_qname(ctx, offset + DnsHdr::LEN, event)? + 4;
+impl TryFrom<u16> for RecordType {
+    type Error = DnsParseError;
 
-//     parse_rdata(ctx, offset, event)?;
-// }
+    fn try_from(val: u16) -> Result<Self, Self::Error> {
+        match val {
+            1 => Ok(Self::A),
+            28 => Ok(Self::AAAA),
+            other => Err(DnsParseError::UnsupportedRecordType(other)),
+        }
+    }
+}
 
-// /// Parses variable-length length-prefixed DNS domain labels (`QNAME`) from the Question section.
-// ///
-// /// Question Section Wire Layout (RFC 1035 Section 4.1.2):
-// /// +---------------------------------------------------+
-// /// | QNAME  (Variable: length-prefixed domain labels) |
-// /// |        e.g. \x03www\x06google\x03com\x00           |
-// /// +---------------------------------------------------+
-// /// | QTYPE  (2 bytes) - 0x0001 (A), 0x001C (AAAA), etc.|
-// /// +---------------------------------------------------+
-// /// | QCLASS (2 bytes) - 0x0001 (IN - Internet)         |
-// /// +---------------------------------------------------+
-// ///
-// /// Label Encoding:
-// /// - Each domain label starts with a 1-byte length prefix (0x01 to 0x3F).
-// /// - QNAME terminates with a null byte (0x00).
-// /// - Dot separators ('.') are inserted between labels into `event.domain_name`.
-// #[inline(always)]
-// fn parse_qname(ctx: &TcContext, mut offset: usize, event: &mut DnsEvent) -> Result<usize, ()> {
-//     let mut out_idx: usize = 0;
-//     let mut label_remaining: usize = 0;
+fn reset_slot(slot: &mut DnsResponse) {
+    slot.src_ip.clear();
+    slot.dst_ip.clear();
+    slot.domain_name.clear();
+    slot.resolved_ip.clear();
+    slot.resolved_ip_raw.clear();
+    slot.src_port = 0;
+    slot.dst_port = 0;
+    slot.ip_family = 0;
+}
 
-//     for _ in 0..256 {
-//         if label_remaining == 0 {
-//             // Read 1-byte label length
-//             let len_ptr: *const u8 = unsafe { ptr_at(ctx, offset)? };
-//             let label_len = unsafe { *len_ptr } as usize;
-//             offset += 1;
+fn parse_ip(raw_ip: &RawIpAddr, out: &mut String) -> Result<(), DnsParseError> {
+    match raw_ip.family {
+        AF_INET => {
+            let octets: [u8; 4] =
+                raw_ip.bytes[..4]
+                    .try_into()
+                    .map_err(|_| DnsParseError::PayloadTooShort {
+                        needed: 4,
+                        available: raw_ip.bytes.len(),
+                    })?;
+            let ip = Ipv4Addr::from(octets);
+            write!(out, "{ip}").map_err(|_| DnsParseError::FormatError)?;
+            Ok(())
+        }
+        AF_INET6 => {
+            let ip = Ipv6Addr::from(raw_ip.bytes);
+            write!(out, "{ip}").map_err(|_| DnsParseError::FormatError)?;
+            Ok(())
+        }
+        other => Err(DnsParseError::UnsupportedAddressFamily(other)),
+    }
+}
 
-//             // 0x00 indicates end of QNAME
-//             if label_len == 0 {
-//                 event.domain_len = out_idx as u32;
-//                 return Ok(offset);
-//             }
+/// Parses variable-length length-prefixed DNS domain labels (`QNAME`) from the Question section.
+///
+/// Question Section Wire Layout (RFC 1035 Section 4.1.2):
+/// +---------------------------------------------------+
+/// | QNAME  (Variable: length-prefixed domain labels)  |
+/// |        e.g. \x03www\x06google\x03com\x00          |
+/// +---------------------------------------------------+
+///
+/// Label Encoding:
+/// - Each domain label starts with a 1-byte length prefix (0x01 to 0x3F).
+/// - QNAME terminates with a null byte (0x00).
+/// - Dot separators ('.') are inserted between labels into `event.domain_name`.
+fn parse_qname(payload: &[u8], out: &mut String) -> Result<usize, DnsParseError> {
+    if payload.len() == 0 {
+        return Err(DnsParseError::PayloadTooShort {
+            needed: 1,
+            available: 0,
+        });
+    }
+    let mut offset = 0;
+    let mut total_domain_len = 0;
 
-//             // https://datatracker.ietf.org/doc/html/rfc1035
-//             // RFC 1035: Label length cannot exceed 63 bytes
-//             if label_len > 63 {
-//                 return Err(());
-//             }
+    while offset < payload.len() {
+        let label_len = payload[offset] as usize;
 
-//             // Add dot separator between labels (e.g. "www" -> "www.")
-//             if out_idx > 0 && out_idx < 256 {
-//                 event.domain_name[out_idx] = b'.';
-//                 out_idx += 1;
-//             }
+        if label_len == 0 {
+            return Ok(offset + 1);
+        }
 
-//             label_remaining = label_len;
-//         } else {
-//             if out_idx >= 256 {
-//                 return Err(());
-//             }
+        if label_len > 63 {
+            return Err(DnsParseError::InvalidLabelLength(label_len));
+        }
 
-//             let char_ptr: *const u8 = unsafe { ptr_at(ctx, offset)? };
-//             event.domain_name[out_idx] = unsafe { *char_ptr };
+        let label_start = offset + 1;
+        let label_end = label_start + label_len;
+        if label_end > payload.len() {
+            return Err(DnsParseError::PayloadTooShort {
+                needed: label_end,
+                available: payload.len(),
+            });
+        }
 
-//             out_idx += 1;
-//             offset += 1;
-//             label_remaining -= 1;
-//         }
-//     }
+        total_domain_len += label_len + 1;
+        if total_domain_len > 255 {
+            return Err(DnsParseError::LabelExceedsMaxLen);
+        }
 
-//     Err(())
-// }
+        let label_bytes = &payload[label_start..label_end];
+        if !label_bytes.is_ascii() {
+            return Err(DnsParseError::NonAsciiDomainName);
+        }
 
-// /// Parses the DNS Answer section RDATA payload to extract resolved IPv4 / IPv6 addresses.
-// ///
-// /// Answer Section Wire Layout (RFC 1035 Section 4.1.3):
-// /// +---------------------------------------------------+
-// /// | NAME     (2 bytes)  - Compression Pointer \xC0\x0C|
-// /// | TYPE     (2 bytes)  - 0x0001 (A) or 0x001C (AAAA) |
-// /// | CLASS    (2 bytes)  - 0x0001 (IN - Internet)      |
-// /// | TTL      (4 bytes)  - Time-To-Live                |
-// /// | RDLENGTH (2 bytes)  - Payload length (4 or 16)    |
-// /// | RDATA    (N bytes)  - Raw IP address bytes        |
-// /// +---------------------------------------------------+
-// #[inline(always)]
-// fn parse_rdata(ctx: &TcContext, mut offset: usize, event: &mut DnsEvent) -> Result<i32, ()> {
-//     // Inspect Answer NAME byte: Compression Pointer (0xC0XX) is 2 bytes
-//     let name_ptr: *const u8 = unsafe { ptr_at(ctx, offset)? };
-//     let name_byte = unsafe { *name_ptr } as u8;
-//     if (name_byte & 0xC0) == 0xC0 {
-//         offset += 2;
-//     } else {
-//         // Fallback for uncompressed name in Answer section
-//         offset = parse_qname(ctx, offset, event)?;
-//     }
+        if !out.is_empty() {
+            out.push('.');
+        }
 
-//     // Read TYPE (2B)
-//     let type_ptr: *const u16 = unsafe { ptr_at(ctx, offset)? };
-//     let rtype = u16::from_be(unsafe { *type_ptr });
+        let label_str =
+            str::from_utf8(label_bytes).map_err(|_| DnsParseError::NonAsciiDomainName)?;
+        out.push_str(label_str);
 
-//     // Read RDLENGTH (at offset + 8, after TYPE(2B) + CLASS(2B) + TTL(4B))
-//     let rdlength_ptr: *const u16 = unsafe { ptr_at(ctx, offset + 8)? };
-//     let rdlength = u16::from_be(unsafe { *rdlength_ptr });
+        offset = label_end;
+    }
+    Err(DnsParseError::PayloadTooShort {
+        needed: offset + 1,
+        available: payload.len(),
+    })
+}
 
-//     // Skip TYPE (2B) + CLASS (2B) + TTL (4B) + RDLENGTH (2B) = 10 bytes to reach RDATA
-//     offset += 10;
+/// Parses the DNS Answer section RDATA payload to extract resolved IPv4 / IPv6 addresses.
+///
+/// Answer Section Wire Layout (RFC 1035 Section 4.1.3):
+/// +----------------------------------------------------------+
+/// | NAME     (2 bytes)  - Compression Pointer 0xC0 (11000000)|
+/// | TYPE     (2 bytes)  - 0x0001 (A) or 0x001C (AAAA)        |
+/// | CLASS    (2 bytes)  - 0x0001 (IN - Internet)             |
+/// | TTL      (4 bytes)  - Time-To-Live                       |
+/// | RDLENGTH (2 bytes)  - Payload length (4 or 16)           |
+/// | RDATA    (N bytes)  - Raw IP address bytes               |
+/// +----------------------------------------------------------+
+fn parse_rdata(payload: &[u8], slot: &mut DnsResponse) -> Result<(), DnsParseError> {
+    if payload.len() == 0 {
+        return Err(DnsParseError::PayloadTooShort {
+            needed: 1,
+            available: 0,
+        });
+    }
+    let mut offset = 0;
+    // RFC 1035 Section 4.1.4
+    let compression_flag = 0xC0;
+    let name_first_byte = payload[offset];
+    if (name_first_byte & compression_flag) == compression_flag {
+        offset += 2;
+    } else {
+        while offset < payload.len() {
+            let label_len = payload[offset] as usize;
+            if label_len > 63 {
+                return Err(DnsParseError::InvalidLabelLength(label_len));
+            }
+            if label_len == 0 {
+                offset += 1;
+                break;
+            }
+            offset += 1 + label_len;
+        }
+    }
 
-//     match rtype {
-//         IpAddress::DNS_V4 if rdlength == 4 => {
-//             let addr_ptr: *const [u8; 4] = unsafe { ptr_at(ctx, offset)? };
-//             event.resolved_ip = IpAddress::V4(unsafe { *addr_ptr });
-//         }
-//         IpAddress::DNS_V6 if rdlength == 16 => {
-//             let addr_ptr: *const [u8; 16] = unsafe { ptr_at(ctx, offset)? };
-//             event.resolved_ip = IpAddress::V6(unsafe { *addr_ptr });
-//         }
-//         _ => {
-//             event.resolved_ip = IpAddress::Unknown;
-//         }
-//     }
+    let rr_header_len = 10;
+    if offset + rr_header_len > payload.len() {
+        return Err(DnsParseError::PayloadTooShort {
+            needed: offset + rr_header_len,
+            available: payload.len(),
+        });
+    }
 
-//     Ok(TC_ACT_OK)
-// }
+    let rtype = RecordType::try_from(u16::from_be_bytes([payload[offset], payload[offset + 1]]))?;
+    let rdlength = u16::from_be_bytes([payload[offset + 8], payload[offset + 9]]) as usize;
+
+    offset += rr_header_len;
+
+    if offset + rdlength > payload.len() {
+        return Err(DnsParseError::PayloadTooShort {
+            needed: offset + rdlength,
+            available: payload.len(),
+        });
+    }
+
+    match rtype {
+        RecordType::A => {
+            if rdlength != 4 {
+                return Err(DnsParseError::PayloadTooShort {
+                    needed: 4,
+                    available: rdlength,
+                });
+            }
+            let octets: [u8; 4] = payload[offset..offset + 4].try_into().map_err(|_| {
+                DnsParseError::PayloadTooShort {
+                    needed: 4,
+                    available: payload.len(),
+                }
+            })?;
+            let ip = Ipv4Addr::from(octets);
+            write!(slot.resolved_ip, "{ip}").map_err(|_| DnsParseError::FormatError)?;
+            slot.resolved_ip_raw.extend_from_slice(&octets[..]);
+            slot.ip_family = AF_INET;
+        }
+        RecordType::AAAA => {
+            if rdlength != 16 {
+                return Err(DnsParseError::PayloadTooShort {
+                    needed: 16,
+                    available: rdlength,
+                });
+            }
+            let octets: [u8; 16] = payload[offset..offset + 16].try_into().map_err(|_| {
+                DnsParseError::PayloadTooShort {
+                    needed: 16,
+                    available: payload.len(),
+                }
+            })?;
+            let ip = Ipv6Addr::from(octets);
+            write!(slot.resolved_ip, "{ip}").map_err(|_| DnsParseError::FormatError)?;
+            slot.resolved_ip_raw.extend_from_slice(&octets[..]);
+            slot.ip_family = AF_INET6;
+        }
+    }
+
+    Ok(())
+}
