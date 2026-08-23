@@ -11,7 +11,7 @@ use cilium_mini_common::{AF_INET, AF_INET6, RawDnsEvent, RawIpAddr};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DnsParseError {
-    PayloadTooShort { needed: usize, available: usize },
+    UnexpectedEndOfPayload,
     InvalidLabelLength(usize),
     LabelExceedsMaxLen,
     NonAsciiDomainName,
@@ -23,11 +23,8 @@ pub enum DnsParseError {
 impl fmt::Display for DnsParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::PayloadTooShort { needed, available } => {
-                write!(
-                    f,
-                    "Payload too short: needed {needed} bytes, available {available}"
-                )
+            Self::UnexpectedEndOfPayload => {
+                write!(f, "Unexpected end of DNS payload (truncated packet)")
             }
             Self::InvalidLabelLength(len) => write!(f, "Invalid label length: {len} (> 63)"),
             Self::LabelExceedsMaxLen => write!(f, "Label exceeds maximum domain length (255)"),
@@ -56,10 +53,7 @@ pub fn parse_dns_into(
 
     let total_len = raw_event.payload_len as usize;
     if total_len < DnsHdr::LEN {
-        return Err(DnsParseError::PayloadTooShort {
-            needed: DnsHdr::LEN,
-            available: total_len,
-        });
+        return Err(DnsParseError::UnexpectedEndOfPayload);
     }
 
     let dns_payload = &raw_event.payload[..total_len];
@@ -70,10 +64,7 @@ pub fn parse_dns_into(
     // QNAME (qname_len) + QTYPE (2B) + QCLASS (2B)
     let rdata_offset = DnsHdr::LEN + qname_len + 4;
     if rdata_offset > total_len {
-        return Err(DnsParseError::PayloadTooShort {
-            needed: rdata_offset,
-            available: total_len,
-        });
+        return Err(DnsParseError::UnexpectedEndOfPayload);
     }
 
     let rdata_payload = &dns_payload[rdata_offset..];
@@ -127,14 +118,12 @@ fn reset_slot(slot: &mut DnsResponse) {
 fn parse_ip(raw_ip: &RawIpAddr, out: &mut String) -> Result<(), DnsParseError> {
     match raw_ip.family {
         AF_INET => {
-            let octets: [u8; 4] =
-                raw_ip.bytes[..4]
-                    .try_into()
-                    .map_err(|_| DnsParseError::PayloadTooShort {
-                        needed: 4,
-                        available: raw_ip.bytes.len(),
-                    })?;
-            let ip = Ipv4Addr::from(octets);
+            let ip = Ipv4Addr::new(
+                raw_ip.bytes[0],
+                raw_ip.bytes[1],
+                raw_ip.bytes[2],
+                raw_ip.bytes[3],
+            );
             write!(out, "{ip}").map_err(|_| DnsParseError::FormatError)?;
             Ok(())
         }
@@ -160,11 +149,8 @@ fn parse_ip(raw_ip: &RawIpAddr, out: &mut String) -> Result<(), DnsParseError> {
 /// - QNAME terminates with a null byte (0x00).
 /// - Dot separators ('.') are inserted between labels into `event.domain_name`.
 fn parse_qname(payload: &[u8], out: &mut String) -> Result<usize, DnsParseError> {
-    if payload.len() == 0 {
-        return Err(DnsParseError::PayloadTooShort {
-            needed: 1,
-            available: 0,
-        });
+    if payload.is_empty() {
+        return Err(DnsParseError::UnexpectedEndOfPayload);
     }
     let mut offset = 0;
     let mut total_domain_len = 0;
@@ -183,10 +169,7 @@ fn parse_qname(payload: &[u8], out: &mut String) -> Result<usize, DnsParseError>
         let label_start = offset + 1;
         let label_end = label_start + label_len;
         if label_end > payload.len() {
-            return Err(DnsParseError::PayloadTooShort {
-                needed: label_end,
-                available: payload.len(),
-            });
+            return Err(DnsParseError::UnexpectedEndOfPayload);
         }
 
         total_domain_len += label_len + 1;
@@ -209,10 +192,7 @@ fn parse_qname(payload: &[u8], out: &mut String) -> Result<usize, DnsParseError>
 
         offset = label_end;
     }
-    Err(DnsParseError::PayloadTooShort {
-        needed: offset + 1,
-        available: payload.len(),
-    })
+    Err(DnsParseError::UnexpectedEndOfPayload)
 }
 
 /// Parses the DNS Answer section RDATA payload to extract resolved IPv4 / IPv6 addresses.
@@ -227,11 +207,8 @@ fn parse_qname(payload: &[u8], out: &mut String) -> Result<usize, DnsParseError>
 /// | RDATA    (N bytes)  - Raw IP address bytes               |
 /// +----------------------------------------------------------+
 fn parse_rdata(payload: &[u8], slot: &mut DnsResponse) -> Result<(), DnsParseError> {
-    if payload.len() == 0 {
-        return Err(DnsParseError::PayloadTooShort {
-            needed: 1,
-            available: 0,
-        });
+    if payload.is_empty() {
+        return Err(DnsParseError::UnexpectedEndOfPayload);
     }
     let mut offset = 0;
     // RFC 1035 Section 4.1.4
@@ -249,16 +226,17 @@ fn parse_rdata(payload: &[u8], slot: &mut DnsResponse) -> Result<(), DnsParseErr
                 offset += 1;
                 break;
             }
-            offset += 1 + label_len;
+            let next_offset = offset + 1 + label_len;
+            if next_offset > payload.len() {
+                return Err(DnsParseError::UnexpectedEndOfPayload);
+            }
+            offset = next_offset;
         }
     }
 
     let rr_header_len = 10;
     if offset + rr_header_len > payload.len() {
-        return Err(DnsParseError::PayloadTooShort {
-            needed: offset + rr_header_len,
-            available: payload.len(),
-        });
+        return Err(DnsParseError::UnexpectedEndOfPayload);
     }
 
     let rtype = RecordType::try_from(u16::from_be_bytes([payload[offset], payload[offset + 1]]))?;
@@ -267,47 +245,34 @@ fn parse_rdata(payload: &[u8], slot: &mut DnsResponse) -> Result<(), DnsParseErr
     offset += rr_header_len;
 
     if offset + rdlength > payload.len() {
-        return Err(DnsParseError::PayloadTooShort {
-            needed: offset + rdlength,
-            available: payload.len(),
-        });
+        return Err(DnsParseError::UnexpectedEndOfPayload);
     }
 
     match rtype {
         RecordType::A => {
             if rdlength != 4 {
-                return Err(DnsParseError::PayloadTooShort {
-                    needed: 4,
-                    available: rdlength,
-                });
+                return Err(DnsParseError::UnexpectedEndOfPayload);
             }
-            let octets: [u8; 4] = payload[offset..offset + 4].try_into().map_err(|_| {
-                DnsParseError::PayloadTooShort {
-                    needed: 4,
-                    available: payload.len(),
-                }
-            })?;
-            let ip = Ipv4Addr::from(octets);
+            let ip = Ipv4Addr::new(
+                payload[offset],
+                payload[offset + 1],
+                payload[offset + 2],
+                payload[offset + 3],
+            );
             write!(slot.resolved_ip, "{ip}").map_err(|_| DnsParseError::FormatError)?;
-            slot.resolved_ip_raw.extend_from_slice(&octets[..]);
+            slot.resolved_ip_raw
+                .extend_from_slice(&payload[offset..offset + 4]);
             slot.ip_family = AF_INET;
         }
         RecordType::AAAA => {
             if rdlength != 16 {
-                return Err(DnsParseError::PayloadTooShort {
-                    needed: 16,
-                    available: rdlength,
-                });
+                return Err(DnsParseError::UnexpectedEndOfPayload);
             }
-            let octets: [u8; 16] = payload[offset..offset + 16].try_into().map_err(|_| {
-                DnsParseError::PayloadTooShort {
-                    needed: 16,
-                    available: payload.len(),
-                }
-            })?;
+            let mut octets = [0u8; 16];
+            octets.copy_from_slice(&payload[offset..offset + 16]);
             let ip = Ipv6Addr::from(octets);
             write!(slot.resolved_ip, "{ip}").map_err(|_| DnsParseError::FormatError)?;
-            slot.resolved_ip_raw.extend_from_slice(&octets[..]);
+            slot.resolved_ip_raw.extend_from_slice(&octets);
             slot.ip_family = AF_INET6;
         }
     }
