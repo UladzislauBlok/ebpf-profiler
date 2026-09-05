@@ -2,6 +2,38 @@
 
 eBPF-powered Kubernetes Dataplane V2 & Network Observability Daemon in Rust.
 
+---
+
+## Architecture Overview
+
+```mermaid
+flowchart TD
+    subgraph Kernel Space [Linux Kernel: eBPF Datapath]
+        TC["TC Ingress & Egress Hook (clsact)"]
+        CLF["DNS TC Classifier"]
+        TC --> CLF
+        CLF -->|Filter: UDP port 53 responses| RB[("64MB eBPF Ring Buffer")]
+        CLF -->|Non-DNS / Requests| PASS["Pass Packet (Zero Overhead)"]
+    end
+
+    subgraph User Space [Userspace Daemon]
+        RB -->|Epoll Reactive Drain| RDR["Stage 1: eBPF Reader"]
+        RDR -->|Bounded Queue: 1,000 slots| PRS["Stage 2: DNS Wire Parser"]
+        PRS -->|Zero-Allocation Swap| WRT["Stage 3: Commit Log Writer"]
+    end
+
+    subgraph Storage [Disk]
+        WRT -->|256KB Batched Append| LOG[("00000001.ldpb<br/>(Length-Delimited Protobuf)")]
+    end
+```
+
+For detailed component documentation:
+
+- [eBPF Datapath Architecture](docs/ebpf_architecture.md)
+- [Userspace Pipeline Architecture](docs/userspace_architecture.md)
+
+---
+
 ## Prerequisites
 
 1. stable rust toolchains: `rustup toolchain install stable`

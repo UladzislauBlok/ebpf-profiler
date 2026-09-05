@@ -11,16 +11,15 @@ _Goal: Master socket-layer observability and eBPF state management. Move from gl
 - [x] Add `fexit` (entry hooks) to these functions to extract the 4-tuple (Source IP, Source Port, Dest IP, Dest Port) from `struct sock`.
 - [x] Replace map polling with an eBPF Ring Buffer to stream "connection started" and "connection closed" events to user-space asynchronously.
 
-## Phase 2: DNS DPI via Traffic Control (TC) & Fast-Path
+## Phase 2: DNS DPI via Traffic Control (TC) & Userspace Pipeline (Completed)
 
-_Goal: Safely parse packet payloads directly from the network interface using TC, implementing early-exits to achieve zero-overhead monitoring._
+_Goal: Safely capture DNS payloads directly from the network interface using TC fast-path filtering, stream via a BPF Ring Buffer, and parse wire payloads in userspace._
 
-- [x] Transition to **TC (`clsact`) ingress hooks**.
-- [x] Implement **Fast-Path Early Exits**: Write highly optimized header parsing (Ethernet $\to$ IP $\to$ UDP/TCP) that immediately returns `TC_ACT_OK` for any non-port-53 traffic, reducing per-packet overhead to mere nanoseconds.
-- [ ] Build a verifier-safe DNS Header parser (extracting Transaction ID, Flags, Question/Answer count).
-- [ ] **The Verifier Challenge**: Implement bounded loops (e.g., `#pragma unroll` equivalents in Rust) to safely parse the variable-length, length-prefixed DNS domain name labels (e.g., `[3]www[6]google[3]com[0]`) without failing the eBPF static analyzer.
-- [ ] Extract resolved IP addresses from the DNS Response `Answer` section.
-- [ ] Stream the extracted telemetry `(DomainName, ResolvedIP)` to user-space via the `PACKET_STATS_PIPE` Ring Buffer.
+- [x] Transition to **TC (`clsact`) ingress & egress hooks**.
+- [x] Implement **Fast-Path Early Exits**: Header parsing (Ethernet $\to$ IP $\to$ UDP) immediately returns `TC_ACT_OK` for non-port-53 traffic.
+- [x] Stream raw DNS response payloads to user-space via a 64MB eBPF Ring Buffer (`DNS_EVENTS_PIPE`).
+- [x] Build an allocation-conscious DNS wire parser (extracting Transaction ID, QNAME domain labels, and Answer section A/AAAA resolved IPs).
+- [x] Stream parsed events to a sequential, length-delimited Protocol Buffers commit log (`00000001.ldpb`).
 
 ## Phase 3: Dynamic FQDN Network Policies (Dataplane V2 Core)
 

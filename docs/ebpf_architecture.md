@@ -1,62 +1,56 @@
-# Cilium Mini eBPF Architecture
+# Cilium Mini: eBPF Datapath Architecture
 
-This document describes the inner workings of the eBPF component of `cilium-mini-rs` and how it interacts with the Linux kernel and user space.
+The eBPF layer of `cilium-mini-rs` provides high-performance, passive DNS observability directly within the Linux kernel network datapath.
 
-## Kernel Specific Details
+---
 
-### Hook Types
+## Datapath Flow
 
-The eBPF program attaches to the network interface using **Traffic Control (TC) ingress and egress classifier hooks** (`SchedClassifier`). Using TC filters allows the program to inspect network traffic passing through the interface (e.g. `lo` or `eth0`) at the packet level, which is ideal for monitoring and filtering DNS traffic.
+```mermaid
+flowchart TD
+    PKT([Network Interface Packet]) --> TC["TC Hook (clsact: ingress/egress)"]
+    TC --> PROG["DNS TC Classifier"]
 
-### Observed Hooks
+    PROG --> ETH{EtherType?}
+    ETH -->|IPv4| IP4["Validate IPv4 Header Bounds"]
+    ETH -->|IPv6| IP6["Validate IPv6 Header Bounds"]
+    ETH -->|Other| PASS["Pass Packet"]
 
-The TC classifier hooks into the interface and routes packets to:
+    IP4 --> UDP{Protocol == UDP?}
+    IP6 --> UDP
+    UDP -->|No| PASS
 
-* **`dns_tc`** ([cilium-mini-ebpf/src/main.rs](file:///workspace/rust/cilium-mini-rs/cilium-mini-ebpf/src/main.rs)):
-  - **Hook Type**: `classifier`
-  - **Behavior**: Evaluates incoming (ingress) and outgoing (egress) packets. In Phase 2, it will parse variable-length DNS messages to extract queries/responses, and stream the metadata to user-space.
+    UDP -->|Yes| PORT{Source Port == 53?}
+    PORT -->|No| PASS
 
-### DNS Parsing and Early Exits (Fast-Path)
+    PORT -->|Yes: DNS Response| RSV["Reserve Space in Ring Buffer"]
+    RSV --> CPY["Copy IP & Payload (<= 512B)"]
+    CPY --> SUB["Submit Event"]
+    SUB --> PASS
+```
 
-To maintain low latency, the eBPF program implements early-exits:
-1. Parse L2 Ethernet header to verify L3 IPv4 (`ETH_P_IP`) or IPv6 (`ETH_P_IPV6`).
-2. Parse L3 IP header to verify L4 UDP or TCP.
-3. Parse L4 transport header to verify DNS traffic (source or destination port is `53`).
-4. Instantly return `TC_ACT_OK` for non-DNS packets, reducing overhead for unrelated traffic to a minimum.
+---
 
-## Data Modeling
+## Key Technical Details
 
-Both kernel and user space share a common data model ([cilium-mini-common/src/lib.rs](file:///workspace/rust/cilium-mini-rs/cilium-mini-common/src/lib.rs)) with a `#[repr(C)]` layout to guarantee stable memory alignment when passing data across the boundary.
+### 1. Hooking & Traffic Control (TC)
 
-### `DnsEvent`
+- **Attachment**: Attached via the `clsact` qdisc to both **ingress** and **egress** hooks on the target network interface.
+- **Passive Monitoring**: Always returns a pass verdict, ensuring network traffic continues unaffected with zero disruption to host or container networking.
 
-This is the primary event payload, sized at exactly 328 bytes (padded for alignment). It contains:
+### 2. Fast-Path Early Exits
 
-* **`src_ip`** (`IpAddress`): 20 bytes representing source IP.
-* **`dst_ip`** (`IpAddress`): 20 bytes representing destination IP.
-* **`src_port`** (`u16`): 2 bytes representing source port.
-* **`dst_port`** (`u16`): 2 bytes representing destination port.
-* **`domain_name`** (`[u8; 256]`): 256 bytes storing the parsed variable-length DNS domain name labels.
-* **`domain_len`** (`u32`): 4 bytes specifying actual length of the domain name.
-* **`resolved_ip`** (`IpAddress`): 20 bytes containing the resolved IP if the packet is a DNS response.
-* **`is_response`** (`u8`): 1 byte flag (1 if response, 0 if request).
+- **Layer Validation**: Progressively validates Ethernet (IPv4/IPv6), IP header bounds, and the UDP transport layer.
+- **Response Filtering**: Strictly inspects responses originating from DNS port 53. Requests, TCP traffic, and all other protocols immediately bypass deep packet inspection.
 
-### `IpAddress`
+### 3. Memory Layout & Alignment
 
-* The `IpAddress` enum is represented as `V4([u8; 4])`, `V6([u8; 16])`, or `Unknown`. Due to `#[repr(C)]` semantics, the enum discriminant tag takes up 4 bytes (u32), resulting in a 20-byte size for `IpAddress` overall (4 bytes tag + 16 bytes payload).
+- **Shared Structures**: Kernel and user-space share a raw IP address representation and a raw DNS event structure.
+- **Alignment Invariants**: Data structures are C-compatible and 8-byte aligned to guarantee predictable memory layouts across the kernel boundary.
+- **Compiler Optimization**: IP copying is performed via 64-bit unrolled word assignments to eliminate compiler-generated memory copy intrinsics in eBPF bytecode.
 
-## Kernel to User Space Communication
+### 4. Ring Buffer Transport
 
-Communication is achieved using an **eBPF Ring Buffer** (`bpf_ringbuf`). This is an efficient, lockless, MPSC (multi-producer, single-consumer) queue.
-
-* **Map Name**: `DNS_EVENTS_PIPE`
-* **Sizing**:
-  - Size must be a power-of-2 multiple of the system page size (typically 4096 bytes).
-  - Chosen Size: **67,108,864 bytes (64 MB)**.
-  - Sizing Calculation: At ~10,000 events/sec, with an entry size of 336 bytes (328 bytes payload + 8 bytes kernel header), a 64 MB ring buffer can hold up to ~10 seconds of backlogged telemetry events without dropping packets.
-* **Process**:
-  1. For every captured DNS packet, the eBPF program parses the protocol headers into a `DnsEvent` struct.
-  2. Space is reserved in the `DNS_EVENTS_PIPE` ring buffer.
-  3. Data is written into the reserved entry.
-  4. The entry is submitted, waking up the user space consumer to read the event.
-
+- **Capacity**: Sized at **64 MB** (power-of-2 page-aligned) to absorb heavy traffic bursts (~10,000 events/sec for ~10 seconds) without dropping events.
+- **Zero-Copy Reservation**: Allocates memory directly within the ring buffer, copies up to 512 bytes of DNS payload using bounded loops for verifier compliance, and submits the event.
+- **Latency Tracking**: Captures kernel timestamps to measure eBPF processing duration.
