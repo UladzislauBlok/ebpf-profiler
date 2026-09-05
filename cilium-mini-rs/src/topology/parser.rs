@@ -8,6 +8,8 @@ use std::{
 
 use crate::topology::proto::DnsResponse;
 use cilium_mini_common::{AF_INET, AF_INET6, RawDnsEvent, RawIpAddr};
+use log::info;
+use log::warn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DnsParseError {
@@ -15,7 +17,6 @@ pub enum DnsParseError {
     InvalidLabelLength(usize),
     LabelExceedsMaxLen,
     NonAsciiDomainName,
-    UnsupportedRecordType(u16),
     UnsupportedAddressFamily(u32),
     FormatError,
 }
@@ -29,7 +30,6 @@ impl fmt::Display for DnsParseError {
             Self::InvalidLabelLength(len) => write!(f, "Invalid label length: {len} (> 63)"),
             Self::LabelExceedsMaxLen => write!(f, "Label exceeds maximum domain length (255)"),
             Self::NonAsciiDomainName => write!(f, "Non-ASCII character in domain name"),
-            Self::UnsupportedRecordType(t) => write!(f, "Unsupported DNS record type: {t}"),
             Self::UnsupportedAddressFamily(af) => write!(f, "Unsupported address family: {af}"),
             Self::FormatError => write!(f, "Failed to format IP address string"),
         }
@@ -50,6 +50,7 @@ pub fn parse_dns_into(
 
     slot.src_port = raw_event.src_port.into();
     slot.dst_port = raw_event.dst_port.into();
+    slot.timestamp_ns = raw_event.timestamp_ns;
 
     let total_len = raw_event.payload_len as usize;
     if total_len < DnsHdr::LEN {
@@ -61,6 +62,8 @@ pub fn parse_dns_into(
     let qname_payload = &dns_payload[DnsHdr::LEN..];
     let qname_len = parse_qname(qname_payload, &mut slot.domain_name)?;
 
+    let anscount = DnsHdr::from(dns_payload)?.answer_rrs;
+
     // QNAME (qname_len) + QTYPE (2B) + QCLASS (2B)
     let rdata_offset = DnsHdr::LEN + qname_len + 4;
     if rdata_offset > total_len {
@@ -68,10 +71,11 @@ pub fn parse_dns_into(
     }
 
     let rdata_payload = &dns_payload[rdata_offset..];
-    parse_rdata(rdata_payload, slot)?;
+    parse_rdata(rdata_payload, anscount, slot)?;
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DnsHdr {
     transaction_id: u16,
     flags: u16,
@@ -83,13 +87,30 @@ struct DnsHdr {
 
 impl DnsHdr {
     const LEN: usize = mem::size_of::<Self>();
+
+    pub fn from(payload: &[u8]) -> Result<Self, DnsParseError> {
+        if payload.len() < Self::LEN {
+            return Err(DnsParseError::UnexpectedEndOfPayload);
+        }
+
+        Ok(Self {
+            transaction_id: u16::from_be_bytes([payload[0], payload[1]]),
+            flags: u16::from_be_bytes([payload[2], payload[3]]),
+            questions: u16::from_be_bytes([payload[4], payload[5]]),
+            answer_rrs: u16::from_be_bytes([payload[6], payload[7]]),
+            authority_rrs: u16::from_be_bytes([payload[8], payload[9]]),
+            additional_rrs: u16::from_be_bytes([payload[10], payload[11]]),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 enum RecordType {
     A = 1,
+    CNAME = 5,
     AAAA = 28,
+    UNSUPPORTED(u16),
 }
 
 impl TryFrom<u16> for RecordType {
@@ -98,8 +119,9 @@ impl TryFrom<u16> for RecordType {
     fn try_from(val: u16) -> Result<Self, Self::Error> {
         match val {
             1 => Ok(Self::A),
+            5 => Ok(Self::CNAME),
             28 => Ok(Self::AAAA),
-            other => Err(DnsParseError::UnsupportedRecordType(other)),
+            other => Ok(Self::UNSUPPORTED(other)),
         }
     }
 }
@@ -113,6 +135,7 @@ fn reset_slot(slot: &mut DnsResponse) {
     slot.src_port = 0;
     slot.dst_port = 0;
     slot.ip_family = 0;
+    slot.timestamp_ns = 0;
 }
 
 fn parse_ip(raw_ip: &RawIpAddr, out: &mut String) -> Result<(), DnsParseError> {
@@ -206,76 +229,94 @@ fn parse_qname(payload: &[u8], out: &mut String) -> Result<usize, DnsParseError>
 /// | RDLENGTH (2 bytes)  - Payload length (4 or 16)           |
 /// | RDATA    (N bytes)  - Raw IP address bytes               |
 /// +----------------------------------------------------------+
-fn parse_rdata(payload: &[u8], slot: &mut DnsResponse) -> Result<(), DnsParseError> {
+fn parse_rdata(payload: &[u8], anscount: u16, slot: &mut DnsResponse) -> Result<(), DnsParseError> {
     if payload.is_empty() {
         return Err(DnsParseError::UnexpectedEndOfPayload);
     }
+    const RR_FIXED_HDR_LEN: usize = 10; // TYPE (2B) + CLASS (2B) + TTL (4B) + RDLENGTH (2B)
     let mut offset = 0;
+    for _ in 0..anscount {
+        if offset >= payload.len() {
+            return Err(DnsParseError::UnexpectedEndOfPayload);
+        }
+
+        offset = skip_name(&payload[offset..])?;
+
+        if offset + RR_FIXED_HDR_LEN > payload.len() {
+            return Err(DnsParseError::UnexpectedEndOfPayload);
+        }
+
+        let rtype =
+            RecordType::try_from(u16::from_be_bytes([payload[offset], payload[offset + 1]]))?;
+        let rdlength = u16::from_be_bytes([payload[offset + 8], payload[offset + 9]]) as usize;
+
+        offset += RR_FIXED_HDR_LEN;
+
+        if offset + rdlength > payload.len() {
+            return Err(DnsParseError::UnexpectedEndOfPayload);
+        }
+
+        let rdata = &payload[offset..offset + rdlength];
+
+        match rtype {
+            RecordType::A => {
+                if rdlength != 4 {
+                    return Err(DnsParseError::UnexpectedEndOfPayload);
+                }
+                let ip = Ipv4Addr::new(rdata[0], rdata[1], rdata[2], rdata[3]);
+                write!(slot.resolved_ip, "{ip}").map_err(|_| DnsParseError::FormatError)?;
+                slot.resolved_ip_raw.extend_from_slice(&rdata[..4]);
+                slot.ip_family = AF_INET;
+            }
+            RecordType::AAAA => {
+                if rdlength != 16 {
+                    return Err(DnsParseError::UnexpectedEndOfPayload);
+                }
+                let mut octets = [0u8; 16];
+                octets.copy_from_slice(&rdata);
+                let ip = Ipv6Addr::from(octets);
+                write!(slot.resolved_ip, "{ip}").map_err(|_| DnsParseError::FormatError)?;
+                slot.resolved_ip_raw.extend_from_slice(&octets);
+                slot.ip_family = AF_INET6;
+            }
+            RecordType::CNAME => {
+                info!("Skipping CNAME part");
+            }
+            RecordType::UNSUPPORTED(type_num) => {
+                warn!("Unexpected type {}", type_num);
+            }
+        }
+
+        offset += rdlength;
+    }
+    Ok(())
+}
+
+fn skip_name(payload: &[u8]) -> Result<usize, DnsParseError> {
     // RFC 1035 Section 4.1.4
-    let compression_flag = 0xC0;
-    let name_first_byte = payload[offset];
-    if (name_first_byte & compression_flag) == compression_flag {
-        offset += 2;
-    } else {
-        while offset < payload.len() {
-            let label_len = payload[offset] as usize;
-            if label_len > 63 {
-                return Err(DnsParseError::InvalidLabelLength(label_len));
+    const COMPRESSION_MASK: u8 = 0xC0;
+    let mut offset = 0;
+    while offset < payload.len() {
+        let b = payload[offset];
+
+        if (b & COMPRESSION_MASK) == COMPRESSION_MASK {
+            if offset + 2 > payload.len() {
+                return Err(DnsParseError::UnexpectedEndOfPayload);
             }
-            if label_len == 0 {
-                offset += 1;
-                break;
-            }
+            return Ok(offset + 2);
+        } else if b == 0 {
+            return Ok(offset + 1);
+        } else if b <= 63 {
+            let label_len = b as usize;
             let next_offset = offset + 1 + label_len;
             if next_offset > payload.len() {
                 return Err(DnsParseError::UnexpectedEndOfPayload);
             }
             offset = next_offset;
+        } else {
+            return Err(DnsParseError::InvalidLabelLength(b as usize));
         }
     }
 
-    let rr_header_len = 10;
-    if offset + rr_header_len > payload.len() {
-        return Err(DnsParseError::UnexpectedEndOfPayload);
-    }
-
-    let rtype = RecordType::try_from(u16::from_be_bytes([payload[offset], payload[offset + 1]]))?;
-    let rdlength = u16::from_be_bytes([payload[offset + 8], payload[offset + 9]]) as usize;
-
-    offset += rr_header_len;
-
-    if offset + rdlength > payload.len() {
-        return Err(DnsParseError::UnexpectedEndOfPayload);
-    }
-
-    match rtype {
-        RecordType::A => {
-            if rdlength != 4 {
-                return Err(DnsParseError::UnexpectedEndOfPayload);
-            }
-            let ip = Ipv4Addr::new(
-                payload[offset],
-                payload[offset + 1],
-                payload[offset + 2],
-                payload[offset + 3],
-            );
-            write!(slot.resolved_ip, "{ip}").map_err(|_| DnsParseError::FormatError)?;
-            slot.resolved_ip_raw
-                .extend_from_slice(&payload[offset..offset + 4]);
-            slot.ip_family = AF_INET;
-        }
-        RecordType::AAAA => {
-            if rdlength != 16 {
-                return Err(DnsParseError::UnexpectedEndOfPayload);
-            }
-            let mut octets = [0u8; 16];
-            octets.copy_from_slice(&payload[offset..offset + 16]);
-            let ip = Ipv6Addr::from(octets);
-            write!(slot.resolved_ip, "{ip}").map_err(|_| DnsParseError::FormatError)?;
-            slot.resolved_ip_raw.extend_from_slice(&octets);
-            slot.ip_family = AF_INET6;
-        }
-    }
-
-    Ok(())
+    Err(DnsParseError::UnexpectedEndOfPayload)
 }

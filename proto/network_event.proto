@@ -7,8 +7,9 @@ message DnsResponse {
   string dst_ip = 2;
   uint32 src_port = 3;
   uint32 dst_port = 4;
-  string domain_name = 5;
-  string resolved_ip = 6;
-  bytes resolved_ip_raw = 7;
-  uint32 ip_family = 8;
+  uint64 timestamp_ns = 5;
+  string domain_name = 6;
+  string resolved_ip = 7;
+  bytes resolved_ip_raw = 8;
+  uint32 ip_family = 9;
 }
