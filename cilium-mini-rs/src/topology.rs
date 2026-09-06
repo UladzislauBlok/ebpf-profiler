@@ -1,29 +1,30 @@
-mod parser;
+use std::{
+    fs::OpenOptions,
+    io::{BufWriter, Write},
+};
 
-mod proto {
-    include!(concat!(env!("OUT_DIR"), "/proto.rs"));
-}
-
-use crate::topology::proto::DnsResponse;
 use anyhow::Context;
 use aya::maps::{Map, MapData, RingBuf};
 use cilium_mini_common::RawDnsEvent;
 use log::{debug, error};
 use prost::Message;
-use std::fs::OpenOptions;
-use std::io::{BufWriter, Write};
 use thingbuf::mpsc;
 use tokio::io::unix::AsyncFd;
 
-pub fn assembly_processing_topology(map: Map) -> Result<(), anyhow::Error> {
-    let ring_buf = RingBuf::try_from(map).context("failed to convert map to RingBuf")?;
+use super::{parser, policy::DnsObserver, proto::DnsResponse};
+
+pub fn assembly_processing_topology<O: DnsObserver>(
+    ebpf_map: Map,
+    dns_obs: O,
+) -> Result<(), anyhow::Error> {
+    let ring_buf = RingBuf::try_from(ebpf_map).context("failed to convert map to RingBuf")?;
     let async_fd = AsyncFd::new(ring_buf).context("failed to create AsyncFd")?;
 
     let (raw_dns_tx, raw_dns_rx) = mpsc::channel::<RawDnsEvent>(1_000);
     let (dns_tx, dns_rx) = mpsc::blocking::channel::<DnsResponse>(1_000);
 
     spawn_ebpf_reader(raw_dns_tx, async_fd);
-    spawn_dns_parser(dns_tx, raw_dns_rx);
+    spawn_dns_parser(dns_tx, raw_dns_rx, dns_obs);
     spawn_file_writer(dns_rx);
 
     Ok(())
@@ -65,27 +66,35 @@ fn spawn_ebpf_reader(
     });
 }
 
-fn spawn_dns_parser(
+fn spawn_dns_parser<O: DnsObserver>(
     dns_tx: mpsc::blocking::Sender<DnsResponse>,
     raw_dns_rx: mpsc::Receiver<RawDnsEvent>,
+    mut dns_obs: O,
 ) {
     tokio::spawn(async move {
         let mut local_dns_response = DnsResponse::default();
 
         while let Some(raw_dns_event) = raw_dns_rx.recv_ref().await {
             match parser::parse_dns_into(&raw_dns_event, &mut local_dns_response) {
-                Ok(()) => match dns_tx.try_send_ref() {
-                    Ok(mut slot) => {
-                        std::mem::swap(&mut *slot, &mut local_dns_response);
+                Ok(()) => {
+                    let _ = dns_obs
+                        .update(&local_dns_response)
+                        .inspect_err(|e| error!("Error in observer: {e}"));
+                    match dns_tx.try_send_ref() {
+                        Ok(mut slot) => {
+                            std::mem::swap(&mut *slot, &mut local_dns_response);
+                        }
+                        Err(mpsc::errors::TrySendError::Closed(_)) => {
+                            error!("Event channel closed unexpectedly. Shutting down reader task.");
+                            return;
+                        }
+                        Err(_) => {
+                            debug!(
+                                "Channel is full. Dropping packet to preserve eBPF reader speed."
+                            );
+                        }
                     }
-                    Err(mpsc::errors::TrySendError::Closed(_)) => {
-                        error!("Event channel closed unexpectedly. Shutting down reader task.");
-                        return;
-                    }
-                    Err(_) => {
-                        debug!("Channel is full. Dropping packet to preserve eBPF reader speed.");
-                    }
-                },
+                }
                 Err(e) => {
                     error!("Failed to parse DNS packet: {e}");
                 }

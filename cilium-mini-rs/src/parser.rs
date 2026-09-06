@@ -6,10 +6,10 @@ use std::{
     str,
 };
 
-use crate::topology::proto::DnsResponse;
 use cilium_mini_common::{AF_INET, AF_INET6, RawDnsEvent, RawIpAddr};
-use log::info;
-use log::warn;
+use log::{info, warn};
+
+use super::proto::DnsResponse;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DnsParseError {

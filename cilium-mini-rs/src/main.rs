@@ -1,14 +1,24 @@
+mod parser;
+mod policy;
 mod topology;
+
+mod proto {
+    include!(concat!(env!("OUT_DIR"), "/proto.rs"));
+}
+
+use std::collections::HashSet;
 
 use anyhow::Context;
 use aya::{
     Ebpf,
     programs::{SchedClassifier, TcAttachType, tc},
 };
-use cilium_mini_common::RING_BUF_NAME;
+use cilium_mini_common::{HASH_MAP_NAME, RING_BUF_NAME};
 use clap::Parser;
 use log::{info, warn};
 use tokio::signal;
+
+use crate::policy::FqdnPolicyEngine;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -36,13 +46,22 @@ async fn main() -> anyhow::Result<()> {
         warn!("failed to initialize eBPF logger: {e}");
     }
 
-    attach_tc_program(iface, &mut ebpf)?;
+    attach_dns_hook(iface, &mut ebpf)?;
 
-    let map = ebpf
+    let hash_map = ebpf
+        .take_map(HASH_MAP_NAME)
+        .context(format!("failed to find {} map", HASH_MAP_NAME))?;
+
+    let mut allowed_domains = HashSet::new();
+    allowed_domains.insert(String::from("leetcode.com"));
+
+    let fqdn_policy = FqdnPolicyEngine::new(hash_map, allowed_domains)?;
+
+    let ring_buf = ebpf
         .take_map(RING_BUF_NAME)
         .context(format!("failed to find {} map", RING_BUF_NAME))?;
 
-    if let Err(e) = topology::assembly_processing_topology(map) {
+    if let Err(e) = topology::assembly_processing_topology(ring_buf, fqdn_policy) {
         warn!("Ingestor error: {e:#}");
     }
 
@@ -61,26 +80,22 @@ fn load_ebpf() -> anyhow::Result<Ebpf> {
     .context("failed to load eBPF object")
 }
 
-fn attach_tc_program(iface: &str, ebpf: &mut aya::Ebpf) -> anyhow::Result<()> {
+fn attach_dns_hook(iface: &str, ebpf: &mut aya::Ebpf) -> anyhow::Result<()> {
     let _ = tc::qdisc_add_clsact(iface);
 
-    let program: &mut SchedClassifier = ebpf
+    let dns_hook: &mut SchedClassifier = ebpf
         .program_mut("dns_tc")
         .context("failed to find program 'dns_tc'")?
         .try_into()
         .context("failed to cast program to SchedClassifier")?;
 
-    program.load().context("failed to load tc program")?;
+    dns_hook.load().context("failed to load tc program")?;
 
-    program
+    dns_hook
         .attach(iface, TcAttachType::Ingress)
         .context("failed to attach tc ingress")?;
 
-    program
-        .attach(iface, TcAttachType::Egress)
-        .context("failed to attach tc egress")?;
-
-    info!("Attached TC program to {}", iface);
+    info!("Attached TC dns hook to {}", iface);
     Ok(())
 }
 

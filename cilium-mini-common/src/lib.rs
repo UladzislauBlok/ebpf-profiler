@@ -1,11 +1,11 @@
 #![no_std]
 
 pub const RING_BUF_NAME: &str = "DNS_EVENTS_PIPE";
+pub const HASH_MAP_NAME: &str = "ALLOWED_IP_MAP";
 pub const AF_INET: u32 = 2;
 pub const AF_INET6: u32 = 10;
 pub const MAX_DNS_PAYLOAD_SIZE: usize = 512;
 
-///
 /// _pad to be 24 bytes (64-bit system pointer)
 #[derive(Clone, Copy, Default)]
 #[repr(C, align(8))]
@@ -87,6 +87,9 @@ impl Default for RawDnsEvent {
         }
     }
 }
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for RawIpAddr {}
 
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for RawDnsEvent {}

@@ -1,15 +1,16 @@
 #![no_std]
 #![no_main]
 
+use core::mem;
+
 use aya_ebpf::{
     bindings::TC_ACT_OK,
-    btf_maps::RingBuf,
+    btf_maps::{HashMap, RingBuf},
     macros::{btf_map, classifier},
     programs::TcContext,
 };
 use aya_log_ebpf::debug;
 use cilium_mini_common::{MAX_DNS_PAYLOAD_SIZE, RawDnsEvent, RawIpAddr};
-use core::mem;
 use network_types::{
     eth::{EthHdr, EtherType},
     ip::{IpError, IpProto, Ipv4Hdr, Ipv6Hdr},
@@ -33,6 +34,9 @@ mod vmlinux;
 /// - Chosen size: 67,108,864 bytes (64 MB, power of 2, page-aligned).
 #[btf_map(name = "DNS_EVENTS_PIPE")]
 static DNS_EVENTS_PIPE: RingBuf<RawDnsEvent, 67108864, 0> = RingBuf::new();
+
+#[btf_map(name = "ALLOWED_IP_MAP")]
+static ALLOWED_IP_MAP: HashMap<RawIpAddr, u8, 1024> = HashMap::new();
 
 #[classifier]
 pub fn dns_tc(ctx: TcContext) -> i32 {
